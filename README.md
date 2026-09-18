@@ -13,12 +13,12 @@
 Production-ready PostgreSQL, Redis, monitoring, and backups for a single VPS. One command to install, one command to redeploy, one dashboard for every app.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s 54127
+curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s 7183
 ```
 
 > ⚠️ **Do NOT use port `22` in production.** It is the first port bots and
 > scammers scan — automated attacks start within minutes of a fresh VPS going
-> online. Pick a custom SSH port (e.g. `54127`) and pass it with `-s`.
+> online. Pick a custom SSH port (e.g. `7183`) and pass it with `-s`.
 > The installer opens only that port for SSH in the firewall.
 
 ## What's included
@@ -51,8 +51,8 @@ Single-node Docker Swarm. Always-included monitoring (no opt-in flag). Custom-bu
 ### Install (clean VPS)
 
 ```bash
-# Replace 54127 with YOUR OWN random high SSH port (never 22 — see warning above)
-curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s 54127
+# Replace 7183 with YOUR OWN random SSH port (never 22 — see warning above)
+curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s 7183
 ```
 
 The script will:
@@ -71,14 +71,14 @@ The script will:
 ```bash
 git clone https://github.com/oyenet1/swarm-vps-setup.git /opt/infra
 cd /opt/infra
-sudo ./setup.sh -s 54127
+sudo ./setup.sh -s 7183
 ```
 
 ### Re-run (re-render + redeploy, keep `.env`)
 
 ```bash
 cd /opt/infra
-sudo ./setup.sh -s 54127
+sudo ./setup.sh -s 7183
 ```
 
 The script is **idempotent** and **never overwrites `.env`**. Missing values get filled; existing values are preserved.
@@ -126,9 +126,9 @@ Non-interactive (piped installs never prompt — default is `infra`):
 ```bash
 # shell: aaPanel only (use YOUR custom SSH port, never 22)
 curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh \
-  | sudo bash -s -- -s 54127 --mode panel
+  | sudo bash -s -- -s 7183 --mode panel
 # shell: both
-sudo ./setup.sh -s 54127 --mode both
+sudo ./setup.sh -s 7183 --mode both
 
 # ansible: aaPanel only / both
 ansible-playbook -i inventory.ini site.yml -e infra_mode=panel
@@ -589,7 +589,7 @@ ALERTMANAGER_PORT=9093
 After editing:
 ```bash
 cd /opt/infra
-sudo ./setup.sh -s 54127
+sudo ./setup.sh -s 7183
 ```
 
 ## Ports
@@ -688,7 +688,7 @@ docker stack ps infra                 # show all services and their state
 docker service logs infra_pgbouncer -f
 docker service update --force infra_pgbouncer
 docker stack rm infra
-sudo ./setup.sh -s 54127                       # re-render + redeploy
+sudo ./setup.sh -s 7183                       # re-render + redeploy
 ```
 
 ## Passwords & security model

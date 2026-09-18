@@ -8,13 +8,13 @@
 #
 # .env COMPATIBILITY: this playbook and setup.sh share the same file with
 # the same rules (existing values win, placeholders get filled). Switching
-# between `sudo ./setup.sh -s 54127` and this playbook is safe either way.
+# between `sudo ./setup.sh -s 7183` and this playbook is safe either way.
 #
 # Usage (from this directory):
 #   cp inventory.ini.example inventory.ini   # set YOUR_VPS_IP, user, port
 #   ansible-playbook -i inventory.ini site.yml
 #   # with overrides:
-#   ansible-playbook -i inventory.ini site.yml -e infra_ssh_port=54127 -e infra_r2_backup_enabled=true
+#   ansible-playbook -i inventory.ini site.yml -e infra_ssh_port=7183 -e infra_r2_backup_enabled=true
 # Workers (after the manager is up):
 #   ansible-playbook -i inventory.ini join-workers.yml
 #
