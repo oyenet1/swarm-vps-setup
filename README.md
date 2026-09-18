@@ -83,6 +83,25 @@ sudo ./setup.sh -s 7183
 
 The script is **idempotent** and **never overwrites `.env`**. Missing values get filled; existing values are preserved.
 
+### Use your own credentials (copy `.env.example` → `.env` and edit)
+
+Prefer to set every password yourself instead of letting the script generate
+them? Clone first, write your `.env`, then run — anything you set is kept
+forever; only keys you leave as `change_me_*` get a strong value generated:
+
+```bash
+git clone https://github.com/oyenet1/swarm-vps-setup.git /opt/infra
+cd /opt/infra
+cp .env.example .env
+nano .env   # set POSTGRES_PASSWORD, REDIS_PASSWORD, GRAFANA_PASSWORD,
+            # PGADMIN_PASSWORD, PGBOUNCER_AUTH_PASSWORD, emails, ports…
+sudo ./setup.sh -s 7183
+```
+
+Same rule applies on every re-run and to the Ansible playbook
+(preset the `infra_*_password` vars instead — see
+[`ansible/README.md`](ansible/README.md)): your values win, always.
+
 ### Render configs only (no deploy)
 
 ```bash

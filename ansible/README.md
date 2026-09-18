@@ -95,6 +95,9 @@ Secrets behaviour (what you asked for):
   `-e`/vars win only when non-empty).
 - Prefer Vault? Put the passwords in Vault-encrypted `group_vars/all.yml`
   or `host_vars/` — the play treats them like any preset value.
+- Fully by hand? `cp .env.example .env` on the target (or in your clone),
+  fill in your own credentials, then run the play — like `setup.sh`, it only
+  fills gaps and never overwrites what you set.
 
 Common scenarios:
 
