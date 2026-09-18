@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/inst
 
 > ⚠️ **Do NOT use port `22` in production.** It is the first port bots and
 > scammers scan — automated attacks start within minutes of a fresh VPS going
-> online. Pick a custom SSH port (e.g. `54127`, `22022`) and pass it with `-s`.
+> online. Pick a custom SSH port (e.g. `54127`) and pass it with `-s`.
 > The installer opens only that port for SSH in the firewall.
 
 ## What's included
