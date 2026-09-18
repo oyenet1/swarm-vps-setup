@@ -1,0 +1,106 @@
+-- ──────────────────────────────────────────────────────────────────
+-- 🏢 Company Name: Bonifade Technologies
+-- 👨‍💻 Developer: Bowofade Oyerinde
+-- 🐙 GitHub: oyenet1
+-- 📅 Created Date: 2026-07-16
+-- 🔄 Updated Date: 2026-07-16
+-- ──────────────────────────────────────────────────────────────────
+
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS postgis_topology;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS btree_gin;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE EXTENSION IF NOT EXISTS hstore;
+CREATE EXTENSION IF NOT EXISTS ltree;
+CREATE EXTENSION IF NOT EXISTS citext;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE SCHEMA IF NOT EXISTS pgbouncer;
+
+CREATE OR REPLACE FUNCTION pgbouncer.get_auth(username TEXT)
+RETURNS TABLE(username TEXT, password TEXT)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT rolname::TEXT, rolpassword::TEXT
+  FROM pg_authid
+  WHERE rolname = username
+    AND rolcanlogin
+    AND (rolvaliduntil IS NULL OR rolvaliduntil > now())
+$$;
+
+REVOKE ALL ON FUNCTION pgbouncer.get_auth(TEXT) FROM PUBLIC;
+
+\c postgres
+
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS postgis_topology;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS btree_gin;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE EXTENSION IF NOT EXISTS hstore;
+CREATE EXTENSION IF NOT EXISTS ltree;
+CREATE EXTENSION IF NOT EXISTS citext;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE SCHEMA IF NOT EXISTS pgbouncer;
+
+CREATE OR REPLACE FUNCTION pgbouncer.get_auth(username TEXT)
+RETURNS TABLE(username TEXT, password TEXT)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT rolname::TEXT, rolpassword::TEXT
+  FROM pg_authid
+  WHERE rolname = username
+    AND rolcanlogin
+    AND (rolvaliduntil IS NULL OR rolvaliduntil > now())
+$$;
+
+REVOKE ALL ON FUNCTION pgbouncer.get_auth(TEXT) FROM PUBLIC;
+
+\c template1
+
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS postgis_topology;
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS btree_gin;
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+CREATE EXTENSION IF NOT EXISTS hstore;
+CREATE EXTENSION IF NOT EXISTS ltree;
+CREATE EXTENSION IF NOT EXISTS citext;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE SCHEMA IF NOT EXISTS pgbouncer;
+
+CREATE OR REPLACE FUNCTION pgbouncer.get_auth(username TEXT)
+RETURNS TABLE(username TEXT, password TEXT)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+  SELECT rolname::TEXT, rolpassword::TEXT
+  FROM pg_authid
+  WHERE rolname = username
+    AND rolcanlogin
+    AND (rolvaliduntil IS NULL OR rolvaliduntil > now())
+$$;
+
+REVOKE ALL ON FUNCTION pgbouncer.get_auth(TEXT) FROM PUBLIC;

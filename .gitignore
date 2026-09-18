@@ -1,0 +1,31 @@
+# Environment files (contain secrets)
+.env
+.env.local
+.env.production
+
+# Generated files
+postgres_data/
+monitoring/secrets/*
+!monitoring/secrets/.gitkeep
+pgbouncer/pgbouncer-cert.pem
+pgbouncer/pgbouncer-key.pem
+postgres_config/server-cert.pem
+postgres_config/server-key.pem
+userlist.txt
+pgbouncer.ini
+pgbouncer/userlist.generated.txt
+redis/haproxy.generated.cfg
+monitoring/alertmanager.generated.yml
+config/rclone/rclone.generated.conf
+backups/*.sql.gz
+backups/*/
+
+# Docker volumes
+pgadmin_data/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

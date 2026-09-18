@@ -1,0 +1,80 @@
+// ─── Alloy log shipping for the infra stack ────────────────────
+// Discovers every running container, extracts labels, ships logs to Loki.
+// The relabel rules add three labels to every log line:
+//   job         = "docker"           (Loki stream selector)
+//   container   = <container name>   (which container)
+//   service     = <Swarm stack ns>   (which app, e.g. "my-app")
+//   swarm_service = <full svc name>  (e.g. "my-app_my-app_app")
+// The `service` label is the one Grafana queries by default.
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "add_labels" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "docker"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "^/(.+)$"
+    target_label  = "container"
+    replacement   = "$1"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_stack_namespace"]
+    target_label  = "service"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_swarm_service_name"]
+    target_label  = "swarm_service"
+  }
+
+  // 1. Direct label from Docker / Swarm if provided: app.env
+  rule {
+    source_labels = ["__meta_docker_container_label_app_env"]
+    regex         = "(.+)"
+    target_label  = "env"
+  }
+
+  // 2. Heuristic from Swarm stack namespace if env is staging
+  rule {
+    source_labels = ["env", "__meta_docker_container_label_com_docker_stack_namespace"]
+    regex         = ";.*staging.*"
+    target_label  = "env"
+    replacement   = "staging"
+  }
+
+  // 3. Default any other Swarm stack to production
+  rule {
+    source_labels = ["env", "__meta_docker_container_label_com_docker_stack_namespace"]
+    regex         = ";(.+)"
+    target_label  = "env"
+    replacement   = "production"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.add_labels.output
+  forward_to = [loki.process.filter_logs.receiver]
+}
+
+loki.process "filter_logs" {
+  stage.drop {
+    older_than = "168h"
+  }
+  forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

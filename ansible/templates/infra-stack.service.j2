@@ -1,0 +1,22 @@
+[Unit]
+Description=Infra Docker Swarm Stack (Postgres, Redis, Monitoring)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory={{ infra_install_dir }}
+EnvironmentFile={{ infra_install_dir }}/.env
+ExecStart={{ infra_install_dir }}/scripts/deploy.sh
+ExecStop=/usr/bin/docker stack rm {{ env.INFRA_STACK_NAME }}
+TimeoutStartSec=300
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=infra-stack
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,87 @@
+# ─── Join Swarm workers to the manager ─────────────────────────────
+#
+# The manager (site.yml) already opened the Swarm ports:
+#   2377/tcp (cluster management), 7946/tcp+udp (gossip), 4789/udp (overlay).
+# Workers only need Docker + this play; they run no infra services.
+#
+# Usage:
+#   ansible-playbook -i inventory.ini join-workers.yml
+- name: Fetch worker join token from manager
+  hosts: vps_manager[0]
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Get worker join token
+      ansible.builtin.shell: docker swarm join-token -q worker
+      register: _worker_token
+      changed_when: false
+      no_log: true
+
+    - name: Publish token + manager address for workers
+      ansible.builtin.set_fact:
+        _join_token: "{{ _worker_token.stdout | trim }}"
+        _manager_addr: "{{ infra_swarm_advertise_addr if (infra_swarm_advertise_addr | length > 0) else ansible_host }}"
+      no_log: true
+
+- name: Join workers to the Swarm
+  hosts: vps_workers
+  become: true
+  gather_facts: true
+  vars:
+    _mgr: "{{ hostvars[groups['vps_manager'][0]] }}"
+  tasks:
+    - name: Install base packages (apt)
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg, openssl, ufw]
+        state: present
+        update_cache: true
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Check for Docker
+      ansible.builtin.shell: docker --version
+      register: _w_docker
+      failed_when: false
+      changed_when: false
+
+    - name: Install Docker via get.docker.com (apt systems only)
+      ansible.builtin.shell: |
+        set -e
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+        sh /tmp/get-docker.sh
+        rm -f /tmp/get-docker.sh
+      args:
+        creates: /usr/bin/docker
+      when: _w_docker.rc != 0 and ansible_facts.os_family == "Debian"
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+      failed_when: false
+
+    - name: Open Swarm worker ports in UFW when present
+      ansible.builtin.shell: |
+        command -v ufw >/dev/null || exit 0
+        ufw default deny incoming
+        ufw allow {{ infra_ssh_port | default(22) }}/tcp
+        ufw allow 7946/tcp comment 'swarm gossip'
+        ufw allow 7946/udp comment 'swarm gossip'
+        ufw allow 4789/udp comment 'swarm overlay networking'
+        ufw --force enable
+        echo CHANGED
+      register: _w_ufw
+      changed_when: "'CHANGED' in _w_ufw.stdout"
+      when: infra_run_firewall | default(true)
+
+    - name: Check Swarm membership
+      ansible.builtin.shell: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %}'
+      register: _w_swarm
+      failed_when: false
+      changed_when: false
+
+    - name: Join Swarm as worker
+      ansible.builtin.shell: docker swarm join --token {{ _mgr._join_token }} {{ _mgr._manager_addr }}:2377
+      changed_when: true
+      no_log: true
+      when: _w_swarm.stdout | trim != "active"

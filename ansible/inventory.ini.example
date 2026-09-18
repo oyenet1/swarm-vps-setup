@@ -1,0 +1,10 @@
+[vps_manager]
+# Single VPS (default): the Swarm manager. Also works when this host
+# later gains workers — workers use join-workers.yml to join it.
+vps1 ansible_host=YOUR_VPS_IP ansible_user=root ansible_port=22
+
+[vps_workers]
+# Optional Swarm workers. They only need Docker + `join-workers.yml`;
+# all ports they need are opened by site.yml on the manager and by the
+# worker tasks (2377/tcp, 7946/tcp+udp, 4789/udp).
+# worker1 ansible_host=WORKER_IP ansible_user=root ansible_port=22

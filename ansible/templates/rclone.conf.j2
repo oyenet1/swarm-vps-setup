@@ -1,0 +1,8 @@
+[r2]
+type = s3
+provider = Cloudflare
+access_key_id = {{ env.R2_ACCESS_KEY_ID }}
+secret_access_key = {{ env.R2_SECRET_ACCESS_KEY }}
+endpoint = {{ rclone_endpoint }}
+acl = private
+no_check_bucket = false

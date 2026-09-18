@@ -1,0 +1,56 @@
+# ─── Example app stack: zero-touch monitoring onboarding ──────────
+# Copy this file into YOUR app repo as docker-swarm.yml, adjust names/
+# ports, then: docker stack deploy -c docker-swarm.yml my-app
+#
+# That's it. No changes to the infra repo needed:
+#   - Metrics: Prometheus auto-discovers this service via the deploy
+#     labels below (swarm-apps job) and scrapes :3000/metrics.
+#   - Logs: Alloy ships every container stdout to Loki automatically,
+#     tagged service="<stack namespace>" (here: "my-app").
+#   - Grafana: the app appears in the $service / $env dropdowns of
+#     "App Performance & Errors" and "Infrastructure Overview".
+#
+# Contract your app must fulfil:
+#   1. Expose OPEN (no auth) Prometheus text metrics on /metrics
+#      (alias /v1/metrics is also fine — set prometheus.path accordingly).
+#      Required metrics: http_requests_total{method,path,status} (Counter)
+#      and http_request_duration_seconds{method,path,status} (Histogram).
+#      Keep the endpoint on the overlay network only — do NOT publish it
+#      as a host port. Only Prometheus inside the stack can reach it.
+#   2. Log to stdout (JSON lines recommended). Nothing else to configure.
+
+services:
+  app:
+    image: my-registry/my-app:latest
+    environment:
+      DATABASE_URL: postgres://app_user:${DB_PASSWORD:-change_me}@pgbouncer:6432/myapp_db
+      REDIS_URL: redis://:${REDIS_PASSWORD:-change_me}@redis-proxy:6379/0
+      PORT: "3000"
+    networks:
+      - infra
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      # ── Monitoring autodetection labels (this is the whole integration) ──
+      labels:
+        prometheus.enable: "true"    # REQUIRED: opt-in to scraping
+        prometheus.port: "3000"      # REQUIRED: container port serving metrics
+        prometheus.path: "/metrics"  # optional, default /metrics (use /v1/metrics if yours differs)
+        # prometheus.service: "my-app" # optional, defaults to stack name
+        # app.env: "production"        # optional: production|staging (auto: name contains "staging" → staging)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  infra:
+    external: true

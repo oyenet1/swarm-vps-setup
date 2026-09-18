@@ -1,0 +1,35 @@
+global
+    log stdout format raw local0
+    maxconn 50000
+
+defaults
+    mode tcp
+    log global
+    timeout connect 5s
+    timeout client 60s
+    timeout server 60s
+    option tcplog
+
+resolvers docker
+    nameserver dns 127.0.0.11:53
+    resolve_retries 3
+    timeout resolve 1s
+    timeout retry 1s
+    hold valid 2s
+
+frontend redis_front
+    bind *:6379
+    default_backend redis_master_backend
+
+backend redis_master_backend
+    option tcp-check
+    tcp-check send "AUTH {{ env.REDIS_PASSWORD }}\r\n"
+    tcp-check expect string +OK
+    tcp-check send "PING\r\n"
+    tcp-check expect string +PONG
+    tcp-check send "INFO replication\r\n"
+    tcp-check expect string role:master
+    tcp-check send "QUIT\r\n"
+    tcp-check expect string +OK
+    server redis-master redis-master:6379 check inter 1000 rise 2 fall 2 resolvers docker resolve-prefer ipv4
+    server redis-replica redis-replica:6379 check inter 1000 rise 2 fall 2 resolvers docker resolve-prefer ipv4

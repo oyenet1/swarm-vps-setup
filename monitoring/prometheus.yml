@@ -1,0 +1,169 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+rule_files:
+  - /etc/prometheus/alert.rules.yml
+
+# ─── Built-in service scrapes ────────────────────────────────────
+# The infra stack's own services. App scrapes come from two sources:
+#   1. swarm-apps (PRIMARY): automatic Swarm service discovery — any app
+#      on the 'infra' network with prometheus.enable=true is scraped.
+#   2. apps (FALLBACK): file_sd from /etc/prometheus/targets/*.json —
+#      for host-run apps or non-Swarm edge cases.
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+
+  # ─── Automatic Docker Swarm Service Discovery ──────────────────
+  # YES — this auto-detects ANY app on the same Swarm that joins the
+  # 'infra' overlay network. No JSON files, no Prometheus reload, no
+  # infra redeploy needed.
+  #
+  # App-side contract (in YOUR app's docker-swarm.yml, on the service):
+  #   networks:
+  #     - infra
+  #   deploy:
+  #     labels:
+  #       prometheus.enable: "true"   # REQUIRED — opt-in to scraping
+  #       prometheus.port: "3000"     # REQUIRED — container port serving metrics
+  #       prometheus.path: "/metrics" # optional, default /metrics
+  #       prometheus.service: "my-app"# optional, defaults to stack namespace
+  #       app.env: "production"       # optional, auto-detects staging in name
+  # See templates/example-app-swarm.yml for a full copy-paste example.
+  - job_name: swarm-apps
+    dockerswarm_sd_configs:
+      - host: unix:///var/run/docker.sock
+        role: tasks
+    relabel_configs:
+      # Only tasks attached to the shared overlay network
+      - source_labels: [__meta_dockerswarm_network_name]
+        regex: ".*infra.*"
+        action: keep
+
+      # Ignore the infra stack's own services
+      - source_labels: [__meta_dockerswarm_service_label_com_docker_stack_namespace]
+        regex: "^infra.*$"
+        action: drop
+
+      # OPT-IN: only scrape services with prometheus.enable=true
+      # (service-level label OR container-level label)
+      - source_labels: [__meta_dockerswarm_service_label_prometheus_enable]
+        regex: "true"
+        action: keep
+
+      # Metrics path: default /metrics, override with
+      # deploy label prometheus.path (or prometheus_path)
+      # NOTE: Prometheus sanitizes label names ('.'/'-' → '_'), so deploy
+      # labels prometheus.path, prometheus-path and prometheus_path all
+      # arrive here as ..._prometheus_path. Same for prometheus.port etc.
+      - source_labels: [__meta_dockerswarm_service_label_prometheus_path]
+        regex: "(.+)"
+        target_label: __metrics_path__
+      - source_labels: [__meta_dockerswarm_container_label_prometheus_path]
+        regex: "(.+)"
+        target_label: __metrics_path__
+
+      # Port: REQUIRED via deploy label prometheus.port (or prometheus_port).
+      # __address__ from Swarm SD is the task IP; we rewrite it to IP:<label-port>.
+      - source_labels: [__address__, __meta_dockerswarm_service_label_prometheus_port]
+        regex: "([^:]+)(?::\\d+)?;(\\d+)"
+        replacement: "$1:$2"
+        target_label: __address__
+      - source_labels: [__address__, __meta_dockerswarm_container_label_prometheus_port]
+        regex: "([^:]+)(?::\\d+)?;(\\d+)"
+        replacement: "$1:$2"
+        target_label: __address__
+
+      # Service name: explicit label wins, else stack namespace (e.g. "my-app")
+      - source_labels: [__meta_dockerswarm_service_label_prometheus_service]
+        regex: "(.+)"
+        target_label: service
+      - source_labels: [service, __meta_dockerswarm_service_label_com_docker_stack_namespace]
+        regex: ";(.+)"
+        target_label: service
+        replacement: "$1"
+      - source_labels: [service, __meta_dockerswarm_container_label_com_docker_stack_namespace]
+        regex: ";(.+)"
+        target_label: service
+        replacement: "$1"
+
+      # Environment: explicit app.env label wins, else staging-in-name
+      # heuristic, else production
+      - source_labels: [__meta_dockerswarm_service_label_app_env]
+        regex: "(.+)"
+        target_label: env
+      - source_labels: [__meta_dockerswarm_container_label_app_env]
+        regex: "(.+)"
+        target_label: env
+      - source_labels: [env, __meta_dockerswarm_service_label_com_docker_stack_namespace]
+        regex: ";.*staging.*"
+        target_label: env
+        replacement: "staging"
+      - source_labels: [env, __meta_dockerswarm_service_label_com_docker_stack_namespace]
+        regex: ";(.+)"
+        target_label: env
+        replacement: "production"
+
+      # Unify job label so Grafana (up{job="apps"}, http_requests_total)
+      # matches both auto-discovery and file_sd targets
+      - target_label: job
+        replacement: apps
+
+  # ─── App scrapes (file_sd FALLBACK) ─────────────────────────────
+  # Only needed for apps that CANNOT join the Swarm / set deploy labels
+  # (e.g. process running on the host, external VPS). Swarm apps should
+  # use the label-based auto-discovery above instead — no JSON needed.
+  # Drop a JSON file in monitoring/targets/ (e.g. my-app.json) and
+  # Prometheus picks it up within 30s.
+  # Apps should expose an OPEN metrics endpoint on the overlay network
+  # only (no auth needed — only Prometheus inside the stack can reach it).
+  # See monitoring/targets/my-app.json.example for the file format.
+  - job_name: apps
+    relabel_configs:
+      - source_labels: [metrics_path]
+        target_label:  __metrics_path__
+      - source_labels: [scheme]
+        target_label:  __scheme__
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/*.json
+        refresh_interval: 30s
+
+  # ─── Authenticated apps (optional pattern) ──────────────────────
+  # If an app MUST gate /metrics behind Bearer auth, add a dedicated job
+  # here following this pattern (do NOT hardcode a specific app name in
+  # the committed file — copy this block on the VPS or via setup):
+  #
+  # - job_name: apps-myapp-auth
+  #   authorization:
+  #     type: Bearer
+  #     credentials_file: /etc/prometheus/secrets/myapp_metrics_token
+  #   relabel_configs:
+  #     - source_labels: [metrics_path]
+  #       target_label: __metrics_path__
+  #     - source_labels: [scheme]
+  #       target_label: __scheme__
+  #   file_sd_configs:
+  #     - files:
+  #         - /etc/prometheus/targets/myapp.json
+  #       refresh_interval: 30s

@@ -1,0 +1,83 @@
+# ─── infra / swarm-vps-setup — Ansible variables ────────────────────
+# Copy nothing: override any of these with `-e key=value` or a
+# `host_vars/<host>.yml` file. Secrets: leave empty to auto-generate
+# (preserved in <install_dir>/.env on re-runs, so you can look at them
+# later), or preset them here / via Vault.
+
+# ── Source & layout (mirrors install.sh) ──────────────────────────
+infra_repo_url: "https://github.com/oyenet1/swarm-vps-setup.git"
+infra_branch: "master"
+infra_install_dir: "/opt/infra"
+
+# ── Host & access ─────────────────────────────────────────────────
+infra_ssh_port: 22                 # opened in UFW when available
+infra_public_host: "127.0.0.1"     # PUBLIC_HOST (probes/summary)
+infra_probe_host: "127.0.0.1"      # PROBE_HOST
+infra_swarm_advertise_addr: ""     # empty = auto-detect first non-lo IPv4
+infra_docker_build_network: "host"
+
+# ── Stack identity ────────────────────────────────────────────────
+infra_stack_name: "infra"
+infra_network_name: "infra"
+
+# ── Postgres / PgBouncer (empty secret = generate once, keep in .env)
+infra_postgres_db: "postgres"
+infra_postgres_user: "postgres"
+infra_postgres_password: ""
+infra_pgbouncer_auth_user: "pgbouncer_auth"
+infra_pgbouncer_auth_password: ""
+infra_pgbouncer_port: 6543
+infra_pgbouncer_bind_addr: "0.0.0.0"
+infra_pgbouncer_tls_enabled: false
+infra_pgbouncer_default_pool_size: 50
+infra_pgbouncer_min_pool_size: 5
+infra_pgbouncer_reserve_pool_size: 10
+infra_pgbouncer_max_client_conn: 2000
+infra_postgres_port_direct: 5544
+infra_postgres_max_connections: 300
+infra_postgres_shared_buffers: "256MB"
+
+# ── pgAdmin / Redis ───────────────────────────────────────────────
+infra_pgadmin_email: "admin@example.com"
+infra_pgadmin_password: ""
+infra_pgadmin_port: 5050
+infra_redis_password: ""
+infra_redis_port: 6379
+infra_redis_sentinel_master_name: "dbmaster"
+
+# ── Images (empty = defaults/build logic from setup.sh) ───────────
+infra_postgres_image: "infra/postgres:latest"
+infra_postgres_client_image_tag: "17-alpine"
+infra_backup_image_override: ""    # INFRA_BACKUP_IMAGE; empty = auto
+infra_redis_image_tag: "7-alpine"
+
+# ── Backups / R2 ──────────────────────────────────────────────────
+infra_backup_interval_seconds: 43200
+infra_backup_retention: 2
+infra_r2_backup_enabled: false
+infra_r2_account_id: ""
+infra_r2_access_key_id: ""
+infra_r2_secret_access_key: ""
+infra_r2_bucket: ""
+infra_r2_endpoint: ""              # empty = https://<account>.r2.cloudflarestorage.com
+infra_r2_prefix: "infra/"
+infra_r2_max_backups_per_db: 2
+
+# ── Monitoring ────────────────────────────────────────────────────
+infra_grafana_password: ""
+infra_grafana_port: 3030
+infra_grafana_user: "admin"
+infra_prometheus_port: 9090
+infra_prometheus_retention: "15d"
+infra_loki_port: 3100
+infra_alertmanager_port: 9093
+infra_alert_email_to: ""
+infra_alert_from: "alerts@example.com"
+infra_smtp_smarthost: "smtp.gmail.com:587"
+infra_smtp_user: ""
+infra_smtp_password: ""
+
+# ── Behaviour toggles ─────────────────────────────────────────────
+infra_run_firewall: true           # configure UFW when present
+infra_install_systemd_service: false  # boot persistence via systemd unit
+infra_verify_stack: true           # run PgBouncer/Redis reachability checks

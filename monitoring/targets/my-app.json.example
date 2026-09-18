@@ -1,0 +1,12 @@
+[
+  {
+    "targets": ["my-stack_my-service:3000"],
+    "labels": {
+      "job": "apps",
+      "service": "my-app",
+      "env": "production",
+      "metrics_path": "/metrics",
+      "scheme": "http"
+    }
+  }
+]

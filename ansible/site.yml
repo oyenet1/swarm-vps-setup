@@ -1,0 +1,636 @@
+# ─── infra / swarm-vps-setup — Ansible playbook (native, no .sh needed) ──
+#
+# Does everything install.sh + setup.sh do, as idempotent Ansible tasks:
+#   Docker install → .env (never overwrites yours, fills gaps, generates
+#   missing secrets) → render configs → UFW (incl. Swarm ports for
+#   multi-node) → Swarm init → overlay network → build images → deploy
+#   stack → PgBouncer auth → verify → summary.
+#
+# .env COMPATIBILITY: this playbook and setup.sh share the same file with
+# the same rules (existing values win, placeholders get filled). Switching
+# between `sudo ./setup.sh -s 22` and this playbook is safe either way.
+#
+# Usage (from this directory):
+#   cp inventory.ini.example inventory.ini   # set YOUR_VPS_IP, user, port
+#   ansible-playbook -i inventory.ini site.yml
+#   # with overrides:
+#   ansible-playbook -i inventory.ini site.yml -e infra_ssh_port=2222 -e infra_r2_backup_enabled=true
+# Workers (after the manager is up):
+#   ansible-playbook -i inventory.ini join-workers.yml
+#
+# Requirement on the control machine: ansible-core 2.15+ (no collections
+# needed). Target: apt-based Linux (Ubuntu/Debian) with Python 3.
+- name: Provision infra Swarm stack (manager)
+  hosts: vps_manager
+  become: true
+  gather_facts: true
+
+  vars:
+    # Managed .env keys that only fill gaps (existing values always win).
+    _infra_env_defaults:
+      POSTGRES_DB: "{{ infra_postgres_db }}"
+      POSTGRES_USER: "{{ infra_postgres_user }}"
+      INFRA_STACK_NAME: "{{ infra_stack_name }}"
+      INFRA_NETWORK_NAME: "{{ infra_network_name }}"
+      PUBLIC_HOST: "{{ infra_public_host }}"
+      PROBE_HOST: "{{ infra_probe_host }}"
+      DOCKER_BUILD_NETWORK: "{{ infra_docker_build_network }}"
+      POSTGRES_PORT_DIRECT: "{{ infra_postgres_port_direct }}"
+      PGBOUNCER_PORT: "{{ infra_pgbouncer_port }}"
+      PGBOUNCER_BIND_ADDR: "{{ infra_pgbouncer_bind_addr }}"
+      PGBOUNCER_AUTH_USER: "{{ infra_pgbouncer_auth_user }}"
+      PGBOUNCER_DEFAULT_POOL_SIZE: "{{ infra_pgbouncer_default_pool_size }}"
+      PGBOUNCER_MIN_POOL_SIZE: "{{ infra_pgbouncer_min_pool_size }}"
+      PGBOUNCER_RESERVE_POOL_SIZE: "{{ infra_pgbouncer_reserve_pool_size }}"
+      PGBOUNCER_MAX_CLIENT_CONN: "{{ infra_pgbouncer_max_client_conn }}"
+      PGBOUNCER_TLS_ENABLED: "{{ infra_pgbouncer_tls_enabled | lower }}"
+      PGADMIN_EMAIL: "{{ infra_pgadmin_email }}"
+      PGADMIN_PORT: "{{ infra_pgadmin_port }}"
+      REDIS_PORT: "{{ infra_redis_port }}"
+      REDIS_SENTINEL_MASTER_NAME: "{{ infra_redis_sentinel_master_name }}"
+      BACKUP_INTERVAL_SECONDS: "{{ infra_backup_interval_seconds }}"
+      BACKUP_RETENTION: "{{ infra_backup_retention }}"
+      R2_BACKUP_ENABLED: "{{ infra_r2_backup_enabled | lower }}"
+      R2_PREFIX: "{{ infra_r2_prefix }}"
+      R2_MAX_BACKUPS_PER_DB: "{{ infra_r2_max_backups_per_db }}"
+      GRAFANA_PORT: "{{ infra_grafana_port }}"
+      ALERT_FROM: "{{ infra_alert_from }}"
+      SMTP_SMARTHOST: "{{ infra_smtp_smarthost }}"
+      POSTGRES_IMAGE: "{{ infra_postgres_image }}"
+
+  tasks:
+    # ── 0. Prerequisites (mirrors install.sh + install_docker) ──────
+    - name: Install base packages (apt)
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg, openssl, git, ufw]
+        state: present
+        update_cache: true
+      when: ansible_facts.os_family == "Debian"
+
+    - name: Check for Docker + Compose plugin
+      ansible.builtin.shell: docker compose version
+      register: _docker_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Docker via get.docker.com (apt systems only)
+      ansible.builtin.shell: |
+        set -e
+        curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+        sh /tmp/get-docker.sh
+        rm -f /tmp/get-docker.sh
+      args:
+        creates: /usr/bin/docker
+      when: _docker_check.rc != 0 and ansible_facts.os_family == "Debian"
+
+    - name: Install Docker Compose plugin
+      ansible.builtin.apt:
+        name: docker-compose-plugin
+        state: present
+      when: _docker_check.rc != 0 and ansible_facts.os_family == "Debian"
+
+    - name: Enable and start Docker + containerd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: [docker, containerd]
+      failed_when: false
+
+    - name: Repair containerd overlayfs snapshot dir if missing (mirrors fix_containerd_storage)
+      ansible.builtin.shell: |
+        SNAP_DIR=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots
+        if [ ! -d "$SNAP_DIR" ]; then
+          mkdir -p "$SNAP_DIR" /var/lib/containerd/io.containerd.snapshotter.v1.native/snapshots
+          chown -R root:root /var/lib/containerd || true
+          systemctl restart containerd 2>/dev/null || true
+          systemctl restart docker 2>/dev/null || true
+          sleep 2
+          echo CHANGED
+        else
+          echo OK
+        fi
+      register: _containerd_fix
+      changed_when: "'CHANGED' in _containerd_fix.stdout"
+
+    # ── 1. Repo checkout (mirrors install.sh) ────────────────────────
+    - name: Clone/update infra repo
+      ansible.builtin.git:
+        repo: "{{ infra_repo_url }}"
+        dest: "{{ infra_install_dir }}"
+        version: "{{ infra_branch }}"
+        force: false
+        update: true
+
+    # ── 2. .env: sacred file — merge gaps, generate secrets ──────────
+    # Rules (identical to setup.sh, so both tools stay interchangeable):
+    #   * missing .env → copy .env.example
+    #   * keys from .env.example / managed defaults only appended if absent
+    #   * secrets: explicit var wins; else generate when missing/placeholder
+    #     (empty, change_me_*, password, admin, admin123); user can read
+    #     them from .env afterwards.
+    - name: Create .env from .env.example when missing
+      ansible.builtin.copy:
+        src: "{{ infra_install_dir }}/.env.example"
+        dest: "{{ infra_install_dir }}/.env"
+        mode: "0600"
+        force: false
+        remote_src: true
+
+    - name: Merge .env gaps and secrets (idempotent, never overwrites yours)
+      ansible.builtin.shell: |
+        python3 - "$@" <<'PYEOF'
+        import os, sys, secrets, string
+        env_file = sys.argv[1]
+        example_file = sys.argv[2]
+        lines = open(env_file).read().splitlines()
+        have = {}
+        for ln in lines:
+            if ln and not ln.startswith("#") and "=" in ln:
+                k, v = ln.split("=", 1)
+                have[k] = v
+        def need_secret(v):
+            return v in ("", "password", "admin", "admin123") or v.startswith("change_me_")
+        # 1) append any .env.example keys that are absent (merge_env_defaults)
+        for ln in open(example_file).read().splitlines():
+            if not ln or ln.startswith("#") or "=" not in ln:
+                continue
+            k = ln.split("=", 1)[0]
+            if k not in have:
+                lines.append(ln)
+                have[k] = ln.split("=", 1)[1]
+        # 2) managed defaults only fill absent keys (set_default_env)
+        for pair in os.environ.get("MANAGED_DEFAULTS", "").split("\n"):
+            if not pair or "=" not in pair:
+                continue
+            k, v = pair.split("=", 1)
+            if k not in have:
+                lines.append(f"{k}={v}")
+                have[k] = v
+        # 3) secrets: explicit var wins, else generate when placeholder
+        changed = []
+        secrets_map = {
+            "POSTGRES_PASSWORD": os.environ.get("WANT_POSTGRES_PASSWORD", ""),
+            "PGBOUNCER_AUTH_PASSWORD": os.environ.get("WANT_PGBOUNCER_AUTH_PASSWORD", ""),
+            "PGADMIN_PASSWORD": os.environ.get("WANT_PGADMIN_PASSWORD", ""),
+            "REDIS_PASSWORD": os.environ.get("WANT_REDIS_PASSWORD", ""),
+            "GRAFANA_PASSWORD": os.environ.get("WANT_GRAFANA_PASSWORD", ""),
+        }
+        alphabet = string.ascii_letters + string.digits
+        for k, want in secrets_map.items():
+            cur = have.get(k, "")
+            if want:
+                if cur != want:
+                    changed.append(k)
+                have[k] = want
+            elif k not in have or need_secret(cur):
+                have[k] = "".join(secrets.choice(alphabet) for _ in range(40))
+                changed.append(k)
+        # 4) rewrite managed lines in place, append new keys at end
+        out, seen = [], set()
+        for ln in lines:
+            if ln and not ln.startswith("#") and "=" in ln:
+                k = ln.split("=", 1)[0]
+                if k in have and k not in seen:
+                    out.append(f"{k}={have[k]}")
+                    seen.add(k)
+                    continue
+            out.append(ln)
+        for k, v in have.items():
+            if k not in seen:
+                out.append(f"{k}={v}")
+                seen.add(k)
+        open(env_file, "w").write("\n".join(out) + "\n")
+        print("CHANGED " + ",".join(changed) if changed else "OK")
+        PYEOF
+      args:
+        chdir: "{{ infra_install_dir }}"
+        executable: /bin/bash
+      environment:
+        MANAGED_DEFAULTS: "{{ _infra_env_defaults | dict2items | map(attribute='key') | zip(_infra_env_defaults | dict2items | map(attribute='value')) | map('join', '=') | join('\n') }}"
+        WANT_POSTGRES_PASSWORD: "{{ infra_postgres_password }}"
+        WANT_PGBOUNCER_AUTH_PASSWORD: "{{ infra_pgbouncer_auth_password }}"
+        WANT_PGADMIN_PASSWORD: "{{ infra_pgadmin_password }}"
+        WANT_REDIS_PASSWORD: "{{ infra_redis_password }}"
+        WANT_GRAFANA_PASSWORD: "{{ infra_grafana_password }}"
+      register: _env_merge
+      changed_when: "'CHANGED' in _env_merge.stdout"
+      no_log: true
+
+    - name: Optional .env overrides (only when explicitly set, non-empty)
+      ansible.builtin.lineinfile:
+        path: "{{ infra_install_dir }}/.env"
+        regexp: "^{{ item.key }}="
+        line: "{{ item.key }}={{ item.value }}"
+      loop:
+        - { key: SWARM_ADVERTISE_ADDR, value: "{{ infra_swarm_advertise_addr }}" }
+        - { key: R2_ACCOUNT_ID, value: "{{ infra_r2_account_id }}" }
+        - { key: R2_ACCESS_KEY_ID, value: "{{ infra_r2_access_key_id }}" }
+        - { key: R2_SECRET_ACCESS_KEY, value: "{{ infra_r2_secret_access_key }}" }
+        - { key: R2_BUCKET, value: "{{ infra_r2_bucket }}" }
+        - { key: R2_ENDPOINT, value: "{{ infra_r2_endpoint }}" }
+        - { key: ALERT_EMAIL_TO, value: "{{ infra_alert_email_to }}" }
+        - { key: SMTP_USER, value: "{{ infra_smtp_user }}" }
+        - { key: SMTP_PASSWORD, value: "{{ infra_smtp_password }}" }
+      when: item.value | string | length > 0
+      no_log: true
+
+    - name: Load effective .env into facts for templating
+      ansible.builtin.shell: |
+        python3 -c 'import json; d={}; [d.update([ln.split("=",1)]) for ln in open(".env").read().splitlines() if ln and not ln.startswith("#") and "=" in ln]; print(json.dumps(d))'
+      args:
+        chdir: "{{ infra_install_dir }}"
+      register: _env_json
+      changed_when: false
+      no_log: true
+
+    - name: Set env fact
+      ansible.builtin.set_fact:
+        env: "{{ _env_json.stdout | from_json }}"
+      no_log: true
+
+    # ── 3. R2 validation (mirrors render_rclone_config guards) ───────
+    - name: Validate R2 settings when enabled
+      ansible.builtin.fail:
+        msg: "R2_BACKUP_ENABLED=true but {{ item }} is empty"
+      when: env.R2_BACKUP_ENABLED | lower == "true" and (env[item] | default('') | length == 0)
+      loop: [R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET]
+
+    - name: Require R2 account/endpoint when R2 enabled
+      ansible.builtin.fail:
+        msg: "Set R2_ACCOUNT_ID or R2_ENDPOINT when R2_BACKUP_ENABLED=true"
+      when: env.R2_BACKUP_ENABLED | lower == "true" and (env.R2_ENDPOINT | default('') | length == 0) and (env.R2_ACCOUNT_ID | default('') | length == 0)
+
+    - name: Resolve rclone endpoint
+      ansible.builtin.set_fact:
+        rclone_endpoint: "{{ env.R2_ENDPOINT if (env.R2_ENDPOINT | default('') | length > 0) else ('https://' + env.R2_ACCOUNT_ID + '.r2.cloudflarestorage.com' if (env.R2_BACKUP_ENABLED | lower == 'true') else '') }}"
+
+    # ── 4. Render generated configs (mirrors render_* in setup.sh) ───
+    - name: Generate PgBouncer self-signed cert when missing
+      ansible.builtin.shell: |
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+          -keyout pgbouncer/pgbouncer-key.pem \
+          -out pgbouncer/pgbouncer-cert.pem \
+          -subj "/CN=pgbouncer/O=Infra" \
+          -addext "subjectAltName=DNS:pgbouncer,DNS:localhost,IP:127.0.0.1"
+        chmod 644 pgbouncer/pgbouncer-key.pem pgbouncer/pgbouncer-cert.pem
+        echo CHANGED
+      args:
+        chdir: "{{ infra_install_dir }}"
+        creates: pgbouncer/pgbouncer-cert.pem
+
+    - name: Render pgbouncer.ini
+      ansible.builtin.template:
+        src: pgbouncer.ini.j2
+        dest: "{{ infra_install_dir }}/pgbouncer/pgbouncer.ini"
+        mode: "0644"
+
+    - name: Render pgbouncer userlist
+      ansible.builtin.copy:
+        content: |
+          "{{ env.POSTGRES_USER }}" "{{ env.POSTGRES_PASSWORD }}"
+          "{{ env.PGBOUNCER_AUTH_USER }}" "{{ env.PGBOUNCER_AUTH_PASSWORD }}"
+        dest: "{{ infra_install_dir }}/pgbouncer/userlist.generated.txt"
+        mode: "0644"
+      no_log: true
+
+    - name: Render Redis HAProxy config
+      ansible.builtin.template:
+        src: haproxy.cfg.j2
+        dest: "{{ infra_install_dir }}/redis/haproxy.generated.cfg"
+        mode: "0644"
+      no_log: true
+
+    - name: Ensure sentinel entrypoint is executable
+      ansible.builtin.file:
+        path: "{{ infra_install_dir }}/redis/sentinel-entrypoint.sh"
+        mode: "0755"
+
+    - name: Render pgAdmin servers.json
+      ansible.builtin.template:
+        src: servers.json.j2
+        dest: "{{ infra_install_dir }}/pgadmin/servers.json"
+        mode: "0644"
+
+    - name: Render rclone config
+      ansible.builtin.template:
+        src: rclone.conf.j2
+        dest: "{{ infra_install_dir }}/config/rclone/rclone.generated.conf"
+        mode: "0600"
+      no_log: true
+
+    - name: Render Alertmanager config
+      ansible.builtin.template:
+        src: alertmanager.yml.j2
+        dest: "{{ infra_install_dir }}/monitoring/alertmanager.generated.yml"
+        mode: "0644"
+      no_log: true
+
+    - name: Normalize monitoring target permissions
+      ansible.builtin.shell: chmod 644 monitoring/targets/*.json 2>/dev/null || true
+      args:
+        chdir: "{{ infra_install_dir }}"
+      changed_when: false
+
+    - name: Secure secrets dir (host-created bearer tokens, never in git)
+      ansible.builtin.shell: |
+        mkdir -p monitoring/secrets
+        chmod 700 monitoring/secrets
+        chmod 600 monitoring/secrets/* 2>/dev/null || true
+      args:
+        chdir: "{{ infra_install_dir }}"
+      changed_when: false
+
+    # ── 5. Firewall (setup.sh rules + Swarm ports for multi-node) ────
+    - name: Check for UFW
+      ansible.builtin.shell: command -v ufw
+      register: _ufw_check
+      failed_when: false
+      changed_when: false
+
+    - name: Configure UFW (deny incoming, allow service + Swarm ports)
+      ansible.builtin.shell: |
+        ufw default deny incoming
+        ufw allow {{ infra_ssh_port }}/tcp
+        ufw allow {{ env.PGBOUNCER_PORT }}/tcp
+        ufw allow {{ env.POSTGRES_PORT_DIRECT }}/tcp
+        ufw allow 2377/tcp comment 'swarm cluster management'
+        ufw allow 7946/tcp comment 'swarm gossip'
+        ufw allow 7946/udp comment 'swarm gossip'
+        ufw allow 4789/udp comment 'swarm overlay networking'
+        ufw --force enable
+        echo CHANGED
+      register: _ufw_done
+      changed_when: "'CHANGED' in _ufw_done.stdout"
+      when: infra_run_firewall and _ufw_check.rc == 0
+
+    # ── 6. Swarm init (mirrors init_swarm + deploy.sh guard) ─────────
+    - name: Inspect Swarm state
+      ansible.builtin.shell: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %} {% raw %}{{.Swarm.ControlAvailable}}{% endraw %}'
+      register: _swarm_state
+      failed_when: false
+      changed_when: false
+
+    - name: Detect advertise address when not set
+      ansible.builtin.shell: |
+        ip -o link show up 2>/dev/null | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-)' | head -1 | xargs -I{} ip -4 addr show {} 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -1
+      register: _adv_iface_ip
+      changed_when: false
+      when: "'active true' not in _swarm_state.stdout"
+
+    - name: Resolve Swarm advertise address
+      ansible.builtin.set_fact:
+        _swarm_advertise: "{{ env.SWARM_ADVERTISE_ADDR if (env.SWARM_ADVERTISE_ADDR | default('') | length > 0) else (_adv_iface_ip.stdout | default('') | trim) }}"
+      when: "'active true' not in _swarm_state.stdout"
+
+    - name: Leave stale/worker Swarm state when not an active manager
+      ansible.builtin.shell: docker swarm leave --force 2>/dev/null || true
+      changed_when: true
+      when: "'active true' not in _swarm_state.stdout"
+
+    - name: Initialize Docker Swarm as manager
+      ansible.builtin.shell: |
+        {% if _swarm_advertise | default('') | length > 0 %}docker swarm init --advertise-addr {{ _swarm_advertise }}{% else %}docker swarm init{% endif %}
+        echo CHANGED
+      register: _swarm_init
+      changed_when: "'CHANGED' in _swarm_init.stdout"
+      when: "'active true' not in _swarm_state.stdout"
+
+    # ── 7. Overlay network (mirrors ensure_infra_network) ────────────
+    - name: Inspect infra overlay network
+      ansible.builtin.shell: docker network inspect {{ env.INFRA_NETWORK_NAME }}
+      register: _net_inspect
+      failed_when: false
+      changed_when: false
+
+    - name: Fail when network exists with wrong driver/scope
+      ansible.builtin.shell: docker network inspect {{ env.INFRA_NETWORK_NAME }} --format '{% raw %}{{.Driver}}/{{.Scope}}{% endraw %}'
+      register: _net_kind
+      changed_when: false
+      failed_when: _net_kind.stdout.strip() != "overlay/swarm"
+      when: _net_inspect.rc == 0
+
+    - name: Create attachable overlay network
+      ansible.builtin.shell: docker network create --driver overlay --attachable {{ env.INFRA_NETWORK_NAME }}
+      when: _net_inspect.rc != 0
+
+    # ── 8. Images (mirrors start_stack build logic) ──────────────────
+    - name: Resolve backup image
+      ansible.builtin.set_fact:
+        _backup_image: "{{ infra_backup_image_override if (infra_backup_image_override | length > 0) else ('postgres:' + infra_postgres_client_image_tag if (env.R2_BACKUP_ENABLED | lower != 'true') else 'infra/backup:latest') }}"
+        _pg_image: "{{ env.POSTGRES_IMAGE | default('infra/postgres:latest', true) }}"
+
+    - name: Check postgres image presence
+      ansible.builtin.shell: docker image inspect {{ _pg_image }}
+      register: _pg_inspect
+      failed_when: false
+      changed_when: false
+      no_log: true
+
+    - name: Build custom postgres image when missing
+      ansible.builtin.shell: |
+        if ! docker build --network {{ env.DOCKER_BUILD_NETWORK | default('host', true) }} -t {{ _pg_image }} -f Dockerfile.postgres .; then
+          docker build -t {{ _pg_image }} -f Dockerfile.postgres .
+        fi
+        echo CHANGED
+      args:
+        chdir: "{{ infra_install_dir }}"
+      register: _pg_build
+      changed_when: "'CHANGED' in _pg_build.stdout"
+      when: _pg_inspect.rc != 0 and not (env.POSTGRES_IMAGE is match('postgis/.*') or env.POSTGRES_IMAGE is match('postgres:.*'))
+
+    - name: Check backup image presence
+      ansible.builtin.shell: docker image inspect {{ _backup_image }}
+      register: _bak_inspect
+      failed_when: false
+      changed_when: false
+      no_log: true
+
+    - name: Build backup image when missing
+      ansible.builtin.shell: |
+        if ! docker build --network {{ env.DOCKER_BUILD_NETWORK | default('host', true) }} -t {{ _backup_image }} -f Dockerfile.backup .; then
+          docker build -t {{ _backup_image }} -f Dockerfile.backup .
+        fi
+        echo CHANGED
+      args:
+        chdir: "{{ infra_install_dir }}"
+      register: _bak_build
+      changed_when: "'CHANGED' in _bak_build.stdout"
+      when: >
+        _bak_inspect.rc != 0 and
+        (infra_backup_image_override | length > 0 or (env.R2_BACKUP_ENABLED | lower == 'true'))
+
+    # ── 9. Deploy stack (mirrors start_stack) ────────────────────────
+    - name: Remove old stack to allow config updates
+      ansible.builtin.shell: docker stack rm {{ env.INFRA_STACK_NAME }} 2>/dev/null || true
+      changed_when: true
+
+    - name: Wait for old stack removal (up to 120s)
+      ansible.builtin.shell: |
+        S="{{ env.INFRA_STACK_NAME }}"
+        if [ -z "$(docker service ls --filter label=com.docker.stack.namespace=${S} -q 2>/dev/null)" ] \
+        && [ -z "$(docker network ls --filter label=com.docker.stack.namespace=${S} -q 2>/dev/null)" ] \
+        && [ -z "$(docker config ls --filter label=com.docker.stack.namespace=${S} -q 2>/dev/null)" ] \
+        && [ -z "$(docker secret ls --filter label=com.docker.stack.namespace=${S} -q 2>/dev/null)" ]; then
+          echo GONE
+        else
+          echo WAIT
+          exit 1
+        fi
+      register: _stack_gone
+      until: "'GONE' in _stack_gone.stdout"
+      retries: 60
+      delay: 2
+      changed_when: false
+
+    - name: Deploy stack
+      ansible.builtin.shell: |
+        set -a; . ./.env; set +a
+        export POSTGRES_IMAGE="{{ _pg_image }}" INFRA_BACKUP_IMAGE="{{ _backup_image }}"
+        export INFRA_STACK_NAME="{{ env.INFRA_STACK_NAME }}" INFRA_NETWORK_NAME="{{ env.INFRA_NETWORK_NAME }}"
+        docker stack deploy -c docker-compose.yml "{{ env.INFRA_STACK_NAME }}"
+      args:
+        chdir: "{{ infra_install_dir }}"
+        executable: /bin/bash
+      register: _deploy
+      changed_when: true
+
+    # ── 10. PgBouncer auth role (mirrors configure_database_auth) ────
+    - name: Wait for PostgreSQL to accept connections
+      ansible.builtin.shell: docker run --rm --network {{ env.INFRA_NETWORK_NAME }} postgres:{{ infra_postgres_client_image_tag }} pg_isready -h postgres -U {{ env.POSTGRES_USER }} -d {{ env.POSTGRES_DB }}
+      register: _pg_ready
+      until: _pg_ready.rc == 0
+      retries: 60
+      delay: 2
+      changed_when: false
+      no_log: true
+
+    - name: Configure pgbouncer.get_auth + auth role
+      ansible.builtin.shell: |
+        docker run --rm -i --network {{ env.INFRA_NETWORK_NAME }} -e PGPASSWORD="$PGPASS" postgres:{{ infra_postgres_client_image_tag }} \
+          psql -h postgres -U "{{ env.POSTGRES_USER }}" -d postgres -v ON_ERROR_STOP=1 \
+          -v pgbouncer_auth_user="{{ env.PGBOUNCER_AUTH_USER }}" \
+          -v pgbouncer_auth_password="$AUTHPASS" <<'SQLEOF'
+        CREATE SCHEMA IF NOT EXISTS pgbouncer;
+        CREATE OR REPLACE FUNCTION pgbouncer.get_auth(username TEXT)
+        RETURNS TABLE(username TEXT, password TEXT)
+        LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog
+        AS $$ SELECT rolname::TEXT, rolpassword::TEXT FROM pg_authid
+              WHERE rolname = username AND rolcanlogin
+              AND (rolvaliduntil IS NULL OR rolvaliduntil > now()) $$;
+        REVOKE ALL ON FUNCTION pgbouncer.get_auth(TEXT) FROM PUBLIC;
+        SELECT format('CREATE ROLE %I LOGIN', :'pgbouncer_auth_user')
+        WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'pgbouncer_auth_user')
+        \gexec
+        SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'pgbouncer_auth_user', :'pgbouncer_auth_password')
+        \gexec
+        SELECT format('GRANT USAGE ON SCHEMA pgbouncer TO %I', :'pgbouncer_auth_user')
+        \gexec
+        SELECT format('GRANT EXECUTE ON FUNCTION pgbouncer.get_auth(TEXT) TO %I', :'pgbouncer_auth_user')
+        \gexec
+        SQLEOF
+        docker service update --force {{ env.INFRA_STACK_NAME }}_pgbouncer >/dev/null 2>&1 || true
+        echo CHANGED
+      args:
+        executable: /bin/bash
+      environment:
+        PGPASS: "{{ env.POSTGRES_PASSWORD }}"
+        AUTHPASS: "{{ env.PGBOUNCER_AUTH_PASSWORD }}"
+      register: _auth_cfg
+      changed_when: "'CHANGED' in _auth_cfg.stdout"
+      no_log: true
+
+    # ── 11. Verify (mirrors verify_stack) ────────────────────────────
+    - name: Wait for PgBouncer on host port
+      ansible.builtin.shell: docker run --rm --network host -e PGPASSWORD="$PGPASS" postgres:{{ infra_postgres_client_image_tag }} psql -h {{ env.PROBE_HOST | default('127.0.0.1', true) }} -p {{ env.PGBOUNCER_PORT }} -U {{ env.POSTGRES_USER }} -d {{ env.POSTGRES_DB }} -c 'SELECT 1;'
+      environment:
+        PGPASS: "{{ env.POSTGRES_PASSWORD }}"
+      register: _pb_ready
+      until: _pb_ready.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+      no_log: true
+      when: infra_verify_stack
+
+    - name: Verify PgBouncer wildcard routing with temp db+role
+      ansible.builtin.shell: |
+        set -e
+        SUFFIX=$(date +%s)
+        PROBE_DB="pgbouncer_probe_db_${SUFFIX}"
+        PROBE_ROLE="pgbouncer_probe_role_${SUFFIX}"
+        PROBE_PASS=$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c 40)
+        NET="{{ env.INFRA_NETWORK_NAME }}"; PH="{{ env.PROBE_HOST | default('127.0.0.1', true) }}"; PP="{{ env.PGBOUNCER_PORT }}"
+        IMG="postgres:{{ infra_postgres_client_image_tag }}"
+        docker run --rm -i --network "$NET" -e PGPASSWORD="$PGPASS" "$IMG" psql -h postgres -U "{{ env.POSTGRES_USER }}" -d postgres -v ON_ERROR_STOP=1 -v probe_db="$PROBE_DB" -v probe_role="$PROBE_ROLE" -v probe_password="$PROBE_PASS" <<'SQLEOF'
+        SELECT format('DROP DATABASE IF EXISTS %I WITH (FORCE)', :'probe_db') \gexec
+        SELECT format('DROP ROLE IF EXISTS %I', :'probe_role') \gexec
+        SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'probe_role', :'probe_password') \gexec
+        SELECT format('CREATE DATABASE %I OWNER %I', :'probe_db', :'probe_role') \gexec
+        SQLEOF
+        RESULT=$(docker run --rm --network host -e PGPASSWORD="$PROBE_PASS" "$IMG" psql -h "$PH" -p "$PP" -U "$PROBE_ROLE" -d "$PROBE_DB" -Atc "SELECT current_database() || '|' || current_user;" 2>/dev/null || true)
+        docker run --rm -i --network "$NET" -e PGPASSWORD="$PGPASS" "$IMG" psql -h postgres -U "{{ env.POSTGRES_USER }}" -d postgres -v ON_ERROR_STOP=1 -v probe_db="$PROBE_DB" -v probe_role="$PROBE_ROLE" <<'SQLEOF'
+        SELECT format('DROP DATABASE IF EXISTS %I WITH (FORCE)', :'probe_db') \gexec
+        SELECT format('DROP ROLE IF EXISTS %I', :'probe_role') \gexec
+        SQLEOF
+        [ "$RESULT" = "${PROBE_DB}|${PROBE_ROLE}" ] && echo PROBE_OK || (echo "PROBE FAIL: $RESULT"; exit 1)
+      args:
+        executable: /bin/bash
+      environment:
+        PGPASS: "{{ env.POSTGRES_PASSWORD }}"
+      changed_when: false
+      no_log: true
+      when: infra_verify_stack
+
+    - name: Wait for Redis proxy on host port
+      ansible.builtin.shell: docker run --rm --network host redis:{{ infra_redis_image_tag }} redis-cli -h {{ env.PROBE_HOST | default('127.0.0.1', true) }} -p {{ env.REDIS_PORT }} -a "$RPASS" --no-auth-warning ping 2>/dev/null | grep -q PONG
+      environment:
+        RPASS: "{{ env.REDIS_PASSWORD }}"
+      register: _redis_ready
+      until: _redis_ready.rc == 0
+      retries: 30
+      delay: 2
+      changed_when: false
+      no_log: true
+      when: infra_verify_stack
+
+    # ── 12. Optional boot persistence (mirrors systemd/install-service.sh)
+    - name: Enable Docker at boot
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+      loop: [docker.service, containerd.service]
+      when: infra_install_systemd_service
+
+    - name: Install infra-stack systemd unit
+      ansible.builtin.template:
+        src: infra-stack.service.j2
+        dest: /etc/systemd/system/infra-stack.service
+        mode: "0644"
+      when: infra_install_systemd_service
+      notify: Reload systemd
+
+    - name: Enable infra-stack service
+      ansible.builtin.systemd:
+        name: infra-stack.service
+        enabled: true
+        daemon_reload: true
+      when: infra_install_systemd_service
+
+    # ── 13. Summary (mirrors print_summary) ──────────────────────────
+    - name: Deployment summary
+      ansible.builtin.debug:
+        msg: |
+          Deployment complete (Ansible, native — no .sh involved).
+          Postgres direct: {{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.POSTGRES_PORT_DIRECT }}
+          PgBouncer: {{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.PGBOUNCER_PORT }} (URL: postgres://{{ env.POSTGRES_USER }}:<password>@{{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.PGBOUNCER_PORT }}/{{ env.POSTGRES_DB }})
+          Redis: 127.0.0.1:{{ env.REDIS_PORT }}
+          pgAdmin: http://127.0.0.1:{{ env.PGADMIN_PORT }} ({{ env.PGADMIN_EMAIL }})
+          Grafana: http://{{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.GRAFANA_PORT }} ({{ env.GRAFANA_USER | default('admin', true) }})
+          Backups: {{ infra_install_dir }}/backups, R2={{ env.R2_BACKUP_ENABLED }}
+          Passwords live in {{ infra_install_dir }}/.env (auto-generated where empty).
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
