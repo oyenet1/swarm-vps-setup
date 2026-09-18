@@ -118,7 +118,7 @@ cat <<CREDENTIALS
 ======================================================================
   🔹 POSTGRESQL & PGBOUNCER
   PgBouncer (Apps):      postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${PGBOUNCER_PORT:-6543}/${POSTGRES_DB}
-  Postgres Direct:       postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:${POSTGRES_PORT_DIRECT:-5544}/${POSTGRES_DB}
+  Postgres Direct:       postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB} (overlay only, no host port)
   PgBouncer Auth User:   ${PGBOUNCER_AUTH_USER} / ${PGBOUNCER_AUTH_PASSWORD}
 
 ======================================================================

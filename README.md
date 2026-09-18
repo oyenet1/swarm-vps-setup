@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/inst
 
 | Service | Default port | Purpose |
 |---|---|---|
-| **PostgreSQL 17** (PostGIS + pgvector + pg_cron) | `5544` | Direct admin/migration access |
+| **PostgreSQL 17** (PostGIS + pgvector + pg_cron) | overlay only (`postgres:5432`, no host port) | Migrations/admin via overlay; apps use PgBouncer |
 | **PgBouncer** | `6543` (TLS optional) | Connection pool — apps connect here |
 | **pgAdmin** | `5050` (host-only) | Browser DB admin UI |
 | **Redis** (master + replica + 3-node Sentinel + HAProxy) | `6379` | Cache, queues, sessions |
@@ -221,15 +221,16 @@ postgres://app3_user:PASS@YOUR_VPS_IP:6543/app3
 
 Just `CREATE DATABASE` and `CREATE ROLE` first in pgAdmin or psql. PgBouncer picks up new roles automatically via the `pgbouncer_auth` user — it queries `pg_authid` at login time.
 
-### PostgreSQL direct (admin only)
+### PostgreSQL direct (admin only, overlay-only)
 
-Skips PgBouncer. Use for migrations, pgAdmin, or admin tasks.
+Skips PgBouncer. Use for migrations, pgAdmin, or admin tasks. PostgreSQL has
+**no host port** — it is reachable only inside the Swarm overlay network, so
+there is no same-VPS or external direct URL. All host/external traffic goes
+through PgBouncer above.
 
 | Where | URL |
 |---|---|
-| Same VPS | `postgres://postgres:PASS@127.0.0.1:5544/mydb` |
 | Same Docker Swarm | `postgres://postgres:PASS@postgres:5432/mydb` |
-| External | `postgres://postgres:PASS@YOUR_VPS_IP:5544/mydb` |
 
 ### Redis
 
@@ -571,9 +572,8 @@ REDIS_PASSWORD=...             # Redis auth
 GRAFANA_PASSWORD=...           # Grafana admin login
 
 # Network
-PGBOUNCER_PORT=6543            # public pgbouncer port
-POSTGRES_PORT=5432             # public postgres port (host-only by default)
-POSTGRES_PORT_DIRECT=5544      # direct external postgres port (bypasses pgbouncer)
+PGBOUNCER_PORT=6543            # public pgbouncer port (only public DB port)
+# NOTE: PostgreSQL itself is overlay-only (postgres:5432, no host port)
 PGBOUNCER_TLS_ENABLED=false    # set true to enable self-signed TLS on pgbouncer
 
 # Backups
@@ -615,9 +615,8 @@ sudo ./setup.sh -s 7183
 
 | Service | Default | Purpose |
 |---|---|---|
-| PgBouncer | `0.0.0.0:6543` | Main app endpoint for Postgres (TLS optional) |
-| PostgreSQL | `127.0.0.1:5432` | Local admin only (host-only) |
-| PostgreSQL direct | `0.0.0.0:5544` | Direct PostgreSQL access (no SSL, scram-sha-256) |
+| PgBouncer | `0.0.0.0:6543` | Main app endpoint for Postgres (TLS optional) — the only public DB port |
+| PostgreSQL | overlay only (`postgres:5432`, no host port) | Migrations/admin from inside the Swarm |
 | pgAdmin | `127.0.0.1:5050` | Browser UI |
 | Redis | `127.0.0.1:6379` | Local Redis (host-only) |
 | Prometheus | `127.0.0.1:9090` | Metrics (host-only) |
@@ -759,7 +758,7 @@ infra/
 - All passwords are auto-generated and stored in `.env` (gitignored).
 - Single-node Swarm by default; add workers with `docker swarm join`.
 - For multi-node, `postgres_data` and `backup_data` need shared storage (NFS/EFS).
-- `pg_hba.conf` accepts connections from `0.0.0.0/0` with scram-sha-256 on the direct Postgres port `5544` — for admin use only. For app traffic, use PgBouncer on the configured host port and `pgbouncer:6432` on the overlay network.
+- PostgreSQL has no host port — it is reachable only as `postgres:5432` inside the overlay network. `pg_hba.conf` still requires scram-sha-256. For all host/external traffic, use PgBouncer on the configured host port and `pgbouncer:6432` on the overlay network.
 
 ## Troubleshooting
 

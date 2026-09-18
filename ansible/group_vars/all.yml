@@ -33,7 +33,8 @@ infra_pgbouncer_default_pool_size: 50
 infra_pgbouncer_min_pool_size: 5
 infra_pgbouncer_reserve_pool_size: 10
 infra_pgbouncer_max_client_conn: 2000
-infra_postgres_port_direct: 5544
+# NOTE: no direct postgres host port — PostgreSQL is overlay-only
+# (postgres:5432); all host/external traffic goes through PgBouncer.
 infra_postgres_max_connections: 300
 infra_postgres_shared_buffers: "256MB"
 

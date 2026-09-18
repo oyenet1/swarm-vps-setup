@@ -362,9 +362,11 @@ If the app runs on the **host** (not in Swarm), use localhost ports bound by inf
 
 | Service | Host address |
 |---------|--------------|
-| PgBouncer | `127.0.0.1:6543` |
+| PgBouncer | `127.0.0.1:6543` (only public DB endpoint) |
 | Redis proxy | `127.0.0.1:6380` |
-| Postgres (if exposed) | `127.0.0.1:5434` |
+
+PostgreSQL itself is **not** exposed on the host — use `postgres:5432` from
+inside the Swarm, or connect via PgBouncer.
 
 Inside Swarm containers, always use internal names (`pgbouncer`, `redis-proxy`).
 

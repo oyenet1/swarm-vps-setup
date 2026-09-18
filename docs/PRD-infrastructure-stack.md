@@ -316,7 +316,7 @@ When developer creates `myapp_db` in pgAdmin:
 
 - Volume: `postgres_data_v17`
 - `replicas: 1`, pinned to manager or `node.labels.db=true`
-- Optional host bind: `127.0.0.1:${POSTGRES_HOST_PORT:-5434}:5432`
+- No host bind: PostgreSQL is overlay-only (`postgres:5432`); PgBouncer is the only public DB endpoint
 
 ---
 

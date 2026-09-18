@@ -259,8 +259,9 @@ configure_firewall() {
   fi
 
   if [[ "$SETUP_MODE" != "panel" ]]; then
+    # PgBouncer is the only public database endpoint; PostgreSQL itself is
+    # overlay-only (no host port), so nothing to open for it here.
     ufw allow "$(env_default PGBOUNCER_PORT 6543)/tcp"
-    ufw allow "$(env_default POSTGRES_PORT_DIRECT 5544)/tcp"
   fi
   # Docker Swarm ports (cluster mgmt, gossip, overlay) — needed for workers
   ufw allow 2377/tcp
@@ -327,7 +328,6 @@ prepare_env() {
   set_default_env PUBLIC_HOST 127.0.0.1
   set_default_env PROBE_HOST 127.0.0.1
   set_default_env DOCKER_BUILD_NETWORK host
-  set_default_env POSTGRES_PORT_DIRECT 5544
   set_default_env PGBOUNCER_PORT 6543
   set_default_env PGBOUNCER_BIND_ADDR 0.0.0.0
   set_default_env PGBOUNCER_AUTH_USER pgbouncer_auth
@@ -1027,11 +1027,11 @@ EOF
 
   cat <<EOF
 
-Postgres direct:
-  Host: ${host}
-  Port: $(env_default POSTGRES_PORT_DIRECT 5544)
+Postgres direct (overlay only, no host port):
+  URL (inside Swarm): postgres://$(env_default POSTGRES_USER postgres):<password>@postgres:5432/$(env_default POSTGRES_DB postgres)
+  Use for migrations, pgAdmin, admin tasks. Host/external traffic goes via PgBouncer.
 
-PgBouncer:
+PgBouncer (only public database endpoint):
   Host: ${host}
   Port: $(env_default PGBOUNCER_PORT 6543)
   URL: postgres://$(env_default POSTGRES_USER postgres):<password>@${host}:$(env_default PGBOUNCER_PORT 6543)/$(env_default POSTGRES_DB postgres)

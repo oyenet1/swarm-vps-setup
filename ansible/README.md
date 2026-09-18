@@ -54,7 +54,7 @@ What happens, in order (mirrors `setup.sh` step for step):
    `servers.json`, `rclone.generated.conf`, `alertmanager.generated.yml`
    (plus self-signed PgBouncer cert when absent).
 5. Configures UFW: deny incoming; allow your SSH port, PgBouncer
-   (`6543`), Postgres direct (`5544`), **and Swarm ports
+   (`6543`, the only public DB port — PostgreSQL itself is overlay-only), **and Swarm ports
    `2377/tcp`, `7946/tcp+udp`, `4789/udp`** so workers can join later.
 6. Inits Swarm as manager (auto-detects advertise address unless
    `infra_swarm_advertise_addr` is set), creates the attachable `infra`

@@ -35,7 +35,7 @@
       PUBLIC_HOST: "{{ infra_public_host }}"
       PROBE_HOST: "{{ infra_probe_host }}"
       DOCKER_BUILD_NETWORK: "{{ infra_docker_build_network }}"
-      POSTGRES_PORT_DIRECT: "{{ infra_postgres_port_direct }}"
+
       PGBOUNCER_PORT: "{{ infra_pgbouncer_port }}"
       PGBOUNCER_BIND_ADDR: "{{ infra_pgbouncer_bind_addr }}"
       PGBOUNCER_AUTH_USER: "{{ infra_pgbouncer_auth_user }}"
@@ -382,8 +382,8 @@
         ufw default deny incoming
         ufw allow {{ infra_ssh_port }}/tcp
         {% if _run_infra %}
+        {# PgBouncer is the only public database endpoint; PostgreSQL is overlay-only #}
         ufw allow {{ env.PGBOUNCER_PORT }}/tcp
-        ufw allow {{ env.POSTGRES_PORT_DIRECT }}/tcp
         ufw allow 2377/tcp comment 'swarm cluster management'
         ufw allow 7946/tcp comment 'swarm gossip'
         ufw allow 7946/udp comment 'swarm gossip'
@@ -704,8 +704,8 @@
         msg: |
           Deployment complete (Ansible, native — no .sh involved). Mode: {{ infra_mode }}.
           {% if _run_infra %}
-          Postgres direct: {{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.POSTGRES_PORT_DIRECT }}
-          PgBouncer: {{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.PGBOUNCER_PORT }} (URL: postgres://{{ env.POSTGRES_USER }}:<password>@{{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.PGBOUNCER_PORT }}/{{ env.POSTGRES_DB }})
+          Postgres direct (overlay only, no host port): postgres://{{ env.POSTGRES_USER }}:<password>@postgres:5432/{{ env.POSTGRES_DB }}
+          PgBouncer (only public database endpoint): {{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.PGBOUNCER_PORT }} (URL: postgres://{{ env.POSTGRES_USER }}:<password>@{{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.PGBOUNCER_PORT }}/{{ env.POSTGRES_DB }})
           Redis: 127.0.0.1:{{ env.REDIS_PORT }}
           pgAdmin: http://127.0.0.1:{{ env.PGADMIN_PORT }} ({{ env.PGADMIN_EMAIL }})
           Grafana: http://{{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.GRAFANA_PORT }} ({{ env.GRAFANA_USER | default('admin', true) }})
