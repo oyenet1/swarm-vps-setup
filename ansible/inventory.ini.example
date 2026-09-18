@@ -3,7 +3,7 @@
 # later gains workers — workers use join-workers.yml to join it.
 # SECURITY: do NOT run SSH on port 22 (bots scan it within minutes).
 # Use a custom port on the server and set it here + infra_ssh_port.
-vps1 ansible_host=YOUR_VPS_IP ansible_user=root ansible_port=2222
+vps1 ansible_host=YOUR_VPS_IP ansible_user=root ansible_port=54127
 
 [vps_workers]
 # Optional Swarm workers. They only need Docker + `join-workers.yml`;
