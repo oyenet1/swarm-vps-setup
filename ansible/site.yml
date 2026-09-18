@@ -8,7 +8,7 @@
 #
 # .env COMPATIBILITY: this playbook and setup.sh share the same file with
 # the same rules (existing values win, placeholders get filled). Switching
-# between `sudo ./setup.sh -s 22` and this playbook is safe either way.
+# between `sudo ./setup.sh -s 2222` and this playbook is safe either way.
 #
 # Usage (from this directory):
 #   cp inventory.ini.example inventory.ini   # set YOUR_VPS_IP, user, port
@@ -713,9 +713,30 @@
           Passwords live in {{ infra_install_dir }}/.env (auto-generated where empty).
           {% endif %}
           {% if _run_panel %}
-          aaPanel: https://<server-ip>:7800 (credentials: {{ infra_install_dir }}/aapanel-install.log).
+          aaPanel: https://{{ ansible_host }}:7800 (credentials: {{ infra_install_dir }}/aapanel-install.log).
           Ports opened: 7800 (panel), 80 (http), 443 (https).
           {% endif %}
+
+    # ── 15. Panel login banner — always LAST when panel is involved ──
+    - name: Read installer credentials from panel log (best effort)
+      ansible.builtin.shell: grep -aiE 'username|password|Bt-Panel-URL|panel.?url|port *:' {{ infra_install_dir }}/aapanel-install.log 2>/dev/null | tail -8 || echo "see {{ infra_install_dir }}/aapanel-install.log"
+      register: _panel_creds
+      changed_when: false
+      failed_when: false
+      when: _run_panel
+
+    - name: PANEL LOGIN — open this URL to manage aaPanel
+      ansible.builtin.debug:
+        msg: |
+          ══════════════════════════════════════════════════════════
+          aaPanel is ready — log in and manage it here:
+          https://{{ ansible_host }}:7800
+          ══════════════════════════════════════════════════════════
+          {{ _panel_creds.stdout }}
+          Security: change the default panel port/user/password inside
+          aaPanel (Panel Settings), and do NOT expose port 22 — bots scan
+          it first. Use a custom SSH port.
+      when: _run_panel
 
   handlers:
     - name: Reload systemd

@@ -13,10 +13,13 @@
 Production-ready PostgreSQL, Redis, monitoring, and backups for a single VPS. One command to install, one command to redeploy, one dashboard for every app.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s 22
+curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s 2222
 ```
 
-Replace `22` with your real SSH port.
+> ⚠️ **Do NOT use port `22` in production.** It is the first port bots and
+> scammers scan — automated attacks start within minutes of a fresh VPS going
+> online. Pick a custom SSH port (e.g. `2222`, `22022`) and pass it with `-s`.
+> The installer opens only that port for SSH in the firewall.
 
 ## What's included
 
@@ -31,6 +34,7 @@ Replace `22` with your real SSH port.
 | **Grafana** | `3030` (host-only) | Dashboards (auto-provisioned) |
 | **Loki + Alloy** | `3100` (host-only) | Log aggregation from every container |
 | **Alertmanager** | `9093` (host-only) | Email alerts |
+| **aaPanel** (optional, `--mode panel`/`both`) | `7800` | Server control panel: sites, DBs, mail/SMTP, SSL, cron, firewall |
 
 Single-node Docker Swarm. Always-included monitoring (no opt-in flag). Custom-built Postgres image with all the extensions baked in.
 
@@ -47,8 +51,8 @@ Single-node Docker Swarm. Always-included monitoring (no opt-in flag). Custom-bu
 ### Install (clean VPS)
 
 ```bash
-# Replace 22 with your SSH port
-curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s 22
+# Replace 2222 with YOUR custom SSH port (never 22 — see warning above)
+curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s 2222
 ```
 
 The script will:
@@ -67,14 +71,14 @@ The script will:
 ```bash
 git clone https://github.com/oyenet1/swarm-vps-setup.git /opt/infra
 cd /opt/infra
-sudo ./setup.sh -s 22
+sudo ./setup.sh -s 2222
 ```
 
 ### Re-run (re-render + redeploy, keep `.env`)
 
 ```bash
 cd /opt/infra
-sudo ./setup.sh -s 22
+sudo ./setup.sh -s 2222
 ```
 
 The script is **idempotent** and **never overwrites `.env`**. Missing values get filled; existing values are preserved.
@@ -120,11 +124,11 @@ What should this server run?
 Non-interactive (piped installs never prompt — default is `infra`):
 
 ```bash
-# shell: aaPanel only
+# shell: aaPanel only (use YOUR custom SSH port, never 22)
 curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh \
-  | sudo bash -s -- -s 22 --mode panel
+  | sudo bash -s -- -s 2222 --mode panel
 # shell: both
-sudo ./setup.sh -s 22 --mode both
+sudo ./setup.sh -s 2222 --mode both
 
 # ansible: aaPanel only / both
 ansible-playbook -i inventory.ini site.yml -e infra_mode=panel
@@ -137,8 +141,43 @@ ansible-playbook -i inventory.ini site.yml -e infra_mode=both
 | `panel` | [aaPanel](https://www.aapanel.com) via the official `install_panel_en.sh ipssl` installer (skipped if already present) | `7800` (panel), `80`, `443` |
 | `both` | aaPanel first, then the full stack | all of the above |
 
-aaPanel credentials are printed by its installer and saved to
-`/opt/infra/aapanel-install.log` (gitignored). Panel URL: `https://YOUR_VPS_IP:7800`.
+### aaPanel — what it is and what you get
+
+[aaPanel](https://www.aapanel.com) is a free, web-based Linux server control
+panel. When the panel is involved, the installer **always prints the login URL
+last** (`https://YOUR_VPS_IP:7800`), along with the generated username and
+password — which are also saved to `/opt/infra/aapanel-install.log`
+(gitignored, stays on the server). Open that URL in a browser to customize
+and manage everything below.
+
+What it does for you:
+
+- **Websites in clicks** — host static sites, PHP (multi-version), Node.js,
+  Python, Go and Docker projects behind Nginx/Apache/OpenLiteSpeed with
+  reverse-proxy, rewrites, and one-click free Let's Encrypt SSL.
+- **Databases** — create and manage MySQL/MariaDB (and more via the app
+  store) with backups, remote access control, and phpMyAdmin.
+- **Email / SMTP server** — install the one-click **Mail Server** plugin
+  (Postfix + Dovecot + Roundcube webmail) to host your own mailboxes and
+  send mail (SMTP) from your domain, with spam-filter and DKIM/SPF helpers.
+- **Files & FTP** — web file manager, FTP server + accounts, online editor.
+- **Automation** — cron jobs, scheduled site/DB backups, shell scripts.
+- **Security** — firewall manager, Fail2ban (brute-force protection),
+  SSH hardening helpers, SSL enforcement, login alerts.
+- **Server health** — CPU/RAM/disk/network charts, process manager,
+  one-click LNMP/LAMP stacks, and an app store (Redis, MongoDB, Docker
+  manager, etc.).
+- **Terminal in browser** — full SSH shell without leaving the panel.
+
+> 🔒 **Hardening advice (do this right after first login):**
+> 1. **Never expose SSH on port 22.** Bots scan it within minutes of a VPS
+>    going online. Use a custom port (set it in your VPS console/sshd first,
+>    then pass it with `-s`), and keep `22` closed in the firewall.
+> 2. Inside aaPanel → **Panel Settings**: change the default panel port
+>    (`7800`), panel username/password, and restrict login by IP or add
+>    security entrance (`/random-string`) if offered.
+> 3. Enable **Fail2ban** + the panel firewall, and turn on Let's Encrypt SSL
+>    for the panel itself so logins run over HTTPS.
 
 ## Connection URLs
 
@@ -550,7 +589,7 @@ ALERTMANAGER_PORT=9093
 After editing:
 ```bash
 cd /opt/infra
-sudo ./setup.sh -s 22
+sudo ./setup.sh -s 2222
 ```
 
 ## Ports
@@ -649,7 +688,7 @@ docker stack ps infra                 # show all services and their state
 docker service logs infra_pgbouncer -f
 docker service update --force infra_pgbouncer
 docker stack rm infra
-sudo ./setup.sh -s 22                       # re-render + redeploy
+sudo ./setup.sh -s 2222                       # re-render + redeploy
 ```
 
 ## Passwords & security model

@@ -1074,6 +1074,44 @@ EOF
   fi
 }
 
+print_panel_banner() {
+  # Always the LAST thing printed when the panel is involved, so the login
+  # URL can never scroll past unseen.
+  [[ "$SETUP_MODE" == "infra" ]] && return
+
+  local panel_host
+  panel_host="$(env_default PUBLIC_HOST 127.0.0.1)"
+  if [[ "$panel_host" == "127.0.0.1" || "$panel_host" == "localhost" || -z "$panel_host" ]]; then
+    panel_host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    [[ -z "$panel_host" ]] && panel_host="YOUR_VPS_IP"
+  fi
+
+  local creds=""
+  if [[ -f "${TARGET_DIR}/aapanel-install.log" ]]; then
+    creds="$(grep -aiE 'username|password|Bt-Panel-URL|panel.?url|port *:' "${TARGET_DIR}/aapanel-install.log" 2>/dev/null | tail -8 || true)"
+  fi
+
+  cat <<EOF
+
+${GREEN}══════════════════════════════════════════════════════════════${NC}
+${GREEN}  aaPanel is ready — open this URL to log in and manage it:${NC}
+${GREEN}  https://${panel_host}:7800${NC}
+${GREEN}══════════════════════════════════════════════════════════════${NC}
+EOF
+  if [[ -n "$creds" ]]; then
+    printf '%b\n' "${CYAN}Login details from the installer:${NC}"
+    printf '%s\n' "$creds"
+    printf '\n'
+  else
+    printf '%b\n' "${YELLOW}Login details:${NC} see ${TARGET_DIR}/aapanel-install.log"
+    printf '\n'
+  fi
+  printf '%b\n' "${YELLOW}Security:${NC} change the default panel port, user and password"
+  printf '%b\n' "inside aaPanel (Panel Settings), and do NOT expose port 22 to the"
+  printf '%b\n' "internet — use a custom SSH port. Bots scan port 22 first."
+  printf '\n'
+}
+
 main() {
   parse_args "$@"
   ask_mode
@@ -1129,6 +1167,9 @@ main() {
   fi
 
   print_summary
+  if [[ "$START_STACK" == "true" ]]; then
+    print_panel_banner
+  fi
 }
 
 main "$@"

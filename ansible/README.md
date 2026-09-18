@@ -7,7 +7,7 @@ multi-node) → Swarm init → overlay network → build images → deploy stack
 PgBouncer auth → verify → summary.
 
 Both paths share the same `/opt/infra/.env` with the same rules (existing
-values always win), so switching between `sudo ./setup.sh -s 22` and this
+values always win), so switching between `sudo ./setup.sh -s 2222` and this
 playbook — in either direction — is safe.
 
 ---
@@ -171,7 +171,7 @@ Safe both ways — same files, same rules:
 
 ```bash
 # provisioned with Ansible, now tweak via shell:
-ssh root@vps "cd /opt/infra && ./setup.sh -s 22"
+ssh root@vps "cd /opt/infra && ./setup.sh -s 2222"
 # provisioned with shell, now manage via Ansible:
 ansible-playbook -i inventory.ini site.yml
 ```
