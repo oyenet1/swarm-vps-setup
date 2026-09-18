@@ -77,6 +77,12 @@ infra_smtp_smarthost: "smtp.gmail.com:587"
 infra_smtp_user: ""
 infra_smtp_password: ""
 
+# ── Setup mode: infra | panel | both ──────────────────────────────
+# infra = Docker Swarm stack only; panel = aaPanel server panel only;
+# both = aaPanel first, then the infra stack.
+infra_mode: "infra"
+infra_aapanel_url: "https://www.aapanel.com/script/install_panel_en.sh"
+
 # ── Behaviour toggles ─────────────────────────────────────────────
 infra_run_firewall: true           # configure UFW when present
 infra_install_systemd_service: false  # boot persistence via systemd unit

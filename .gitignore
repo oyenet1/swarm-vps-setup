@@ -25,6 +25,9 @@ pgadmin_data/
 
 # Logs
 *.log
+aapanel-install.log
+install_panel_en.sh
+panel_install_en.sh
 
 # OS files
 .DS_Store

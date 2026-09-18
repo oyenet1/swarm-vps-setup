@@ -7,12 +7,19 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/infra}"
 
 usage() {
   cat <<EOF
-Usage: curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s SSH_PORT [options]
+Usage: curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh | sudo bash -s -- -s SSH_PORT [--mode infra|panel|both] [options]
 
 Options:
   -s PORT      SSH port to allow if UFW is available
+  --mode MODE  what to set up: infra (default), panel (aaPanel only), or both
   --no-start   render files only, do not start containers
   -h           show this help
+
+Modes:
+  infra   this repo's Docker Swarm stack only
+  panel   aaPanel server panel only (https://www.aapanel.com)
+  both    aaPanel first, then the infra stack (asks interactively when run
+          on a terminal without --mode)
 
 Environment overrides:
   REPO_URL     git URL (default: $REPO_URL)
@@ -28,6 +35,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
       -s)
       SSH_PORT="$2"
+      shift 2
+      ;;
+    --mode)
+      EXTRA_ARGS+=("--mode" "$2")
       shift 2
       ;;
     --no-start)

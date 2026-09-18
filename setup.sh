@@ -18,16 +18,25 @@ NC='\033[0m'
 TARGET_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SSH_PORT=""
 START_STACK="true"
+SETUP_MODE="infra"   # infra | panel | both
+MODE_SET="false"
+AAPANEL_URL="https://www.aapanel.com/script/install_panel_en.sh"
 
 usage() {
   cat <<EOF
 Usage: sudo ./setup.sh [options]
 
 Options:
-  -d DIR       deployment directory, default: current directory
-  -s PORT      SSH port to allow if UFW is available
-  --no-start   render files only, do not start containers
-  -h           show this help
+  -d DIR              deployment directory, default: current directory
+  -s PORT             SSH port to allow if UFW is available
+  --mode MODE         what to set up: infra (default), panel, or both
+  --no-start          render files only, do not start containers
+  -h                  show this help
+
+Modes:
+  infra   this repo's Docker Swarm stack only (postgres, redis, monitoring)
+  panel   aaPanel server panel only (https://www.aapanel.com)
+  both    aaPanel first, then the infra stack
 EOF
 }
 
@@ -136,6 +145,11 @@ parse_args() {
         START_STACK="false"
         shift
         ;;
+      --mode)
+        SETUP_MODE="$2"
+        MODE_SET="true"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -145,6 +159,32 @@ parse_args() {
         ;;
     esac
   done
+
+  case "$SETUP_MODE" in
+    infra|panel|both) ;;
+    *) fail "Invalid --mode: $SETUP_MODE (choose infra, panel, or both)" ;;
+  esac
+}
+
+ask_mode() {
+  # Interactive choice — only when stdin is a terminal (never when piped
+  # via curl | bash, where stdin is the script itself).
+  [[ "$MODE_SET" == "true" ]] && return
+  [[ "$START_STACK" != "true" ]] && return
+  [[ -t 0 ]] || return
+
+  printf '%b\n' "${CYAN}What should this server run?${NC}"
+  printf '  ${CYAN}1)${NC} Infrastructure only (Docker Swarm stack)\n'
+  printf '  ${CYAN}2)${NC} aaPanel only (server control panel)\n'
+  printf '  ${CYAN}3)${NC} Both (aaPanel first, then the infra stack)\n'
+  local choice=""
+  read -r -p "Choose [1/2/3] (default: 1): " choice || true
+  case "$choice" in
+    2) SETUP_MODE="panel" ;;
+    3) SETUP_MODE="both" ;;
+    *) SETUP_MODE="infra" ;;
+  esac
+  log "Setup mode: ${SETUP_MODE}"
 }
 
 install_docker() {
@@ -218,10 +258,54 @@ configure_firewall() {
     warn "No SSH port supplied. Existing SSH firewall rules were not changed."
   fi
 
-  ufw allow "$(env_value PGBOUNCER_PORT)/tcp"
-  ufw allow "$(env_value POSTGRES_PORT_DIRECT)/tcp"
+  if [[ "$SETUP_MODE" != "panel" ]]; then
+    ufw allow "$(env_default PGBOUNCER_PORT 6543)/tcp"
+    ufw allow "$(env_default POSTGRES_PORT_DIRECT 5544)/tcp"
+  fi
+  # Docker Swarm ports (cluster mgmt, gossip, overlay) — needed for workers
+  ufw allow 2377/tcp
+  ufw allow 7946/tcp
+  ufw allow 7946/udp
+  ufw allow 4789/udp
+  if [[ "$SETUP_MODE" != "infra" ]]; then
+    # aaPanel: control panel + web + https
+    ufw allow 7800/tcp
+    ufw allow 80/tcp
+    ufw allow 443/tcp
+  fi
   ufw --force enable
-  ok "Firewall allows PgBouncer on port $(env_value PGBOUNCER_PORT) and Postgres on port $(env_value POSTGRES_PORT_DIRECT)"
+  ok "Firewall configured (mode: ${SETUP_MODE})"
+}
+
+install_aapanel() {
+  if [[ "$SETUP_MODE" == "infra" ]]; then
+    return
+  fi
+
+  if [[ -x /www/server/panel/BT-Panel || -f /etc/init.d/bt ]]; then
+    ok "aaPanel is already installed, skipping"
+    return
+  fi
+
+  log "Installing aaPanel (this takes several minutes)"
+  local workdir
+  workdir="$(mktemp -d /tmp/aapanel-install.XXXXXX)"
+  (
+    cd "$workdir"
+    if [[ -f /usr/bin/curl ]]; then
+      curl -ksSO "$AAPANEL_URL"
+    else
+      wget --no-check-certificate -O install_panel_en.sh "$AAPANEL_URL"
+    fi
+    bash install_panel_en.sh ipssl 2>&1 | tee "${TARGET_DIR}/aapanel-install.log"
+  )
+  rm -rf "$workdir"
+
+  if [[ -x /www/server/panel/BT-Panel || -f /etc/init.d/bt ]]; then
+    ok "aaPanel installed — panel credentials saved to ${TARGET_DIR}/aapanel-install.log"
+  else
+    fail "aaPanel install did not complete (see ${TARGET_DIR}/aapanel-install.log)"
+  fi
 }
 
 prepare_env() {
@@ -978,12 +1062,28 @@ Manual deploy:
   docker network create --driver overlay --attachable $(env_default INFRA_NETWORK_NAME infra) 2>/dev/null || true
   docker stack deploy -c docker-compose.yml $(env_default INFRA_STACK_NAME infra)
 EOF
+
+  if [[ "$SETUP_MODE" != "infra" ]]; then
+    cat <<EOF
+
+aaPanel:
+  URL: https://${host}:7800
+  Credentials: ${TARGET_DIR}/aapanel-install.log (printed by the installer)
+  Ports opened: 7800 (panel), 80 (http), 443 (https)
+EOF
+  fi
 }
 
 main() {
   parse_args "$@"
+  ask_mode
 
-  if [[ $EUID -ne 0 && "$START_STACK" == "true" ]]; then
+  local need_infra="false"
+  local need_panel="false"
+  [[ "$SETUP_MODE" != "panel" ]] && need_infra="true"
+  [[ "$SETUP_MODE" != "infra" ]] && need_panel="true"
+
+  if [[ $EUID -ne 0 && "$START_STACK" == "true" && "$need_infra" == "true" ]]; then
     if ! command -v docker >/dev/null 2>&1; then
       fail "Run with sudo for the first bootstrap so Docker can be installed."
     fi
@@ -996,27 +1096,34 @@ main() {
   [[ -f docker-compose.yml ]] || fail "docker-compose.yml not found in ${TARGET_DIR}"
   [[ -f .env.example ]] || fail ".env.example not found in ${TARGET_DIR}"
 
-  if [[ "$START_STACK" == "true" && $EUID -eq 0 ]] && command -v docker >/dev/null 2>&1; then
-    fix_containerd_storage
-  fi
+  if [[ "$need_infra" == "true" ]]; then
+    if [[ "$START_STACK" == "true" && $EUID -eq 0 ]] && command -v docker >/dev/null 2>&1; then
+      fix_containerd_storage
+    fi
 
-  prepare_env
-  render_pgbouncer_config
-  render_redis_config
-  render_pgadmin_config
-  render_rclone_config
-  render_alertmanager_config
+    prepare_env
+    render_pgbouncer_config
+    render_redis_config
+    render_pgadmin_config
+    render_rclone_config
+    render_alertmanager_config
+  fi
 
   if [[ "$START_STACK" == "true" ]]; then
     if [[ $EUID -eq 0 ]]; then
-      install_docker
+      [[ "$need_infra" == "true" ]] && install_docker
       configure_firewall
     else
       ok "Using the existing Docker installation and current firewall state"
     fi
-    start_stack
-    configure_database_auth
-    verify_stack
+    [[ "$need_panel" == "true" ]] && install_aapanel
+    if [[ "$need_infra" == "true" ]]; then
+      start_stack
+      configure_database_auth
+      verify_stack
+    else
+      warn "Panel-only mode complete; infra stack was not deployed"
+    fi
   else
     warn "Render-only mode complete; containers were not started"
   fi

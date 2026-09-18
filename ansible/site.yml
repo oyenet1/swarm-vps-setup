@@ -59,6 +59,16 @@
       POSTGRES_IMAGE: "{{ infra_postgres_image }}"
 
   tasks:
+    - name: Validate infra_mode
+      ansible.builtin.fail:
+        msg: "Invalid infra_mode: {{ infra_mode }} (choose infra, panel, or both)"
+      when: infra_mode not in ['infra', 'panel', 'both']
+
+    - name: Resolve setup-mode facts
+      ansible.builtin.set_fact:
+        _run_infra: "{{ infra_mode != 'panel' }}"
+        _run_panel: "{{ infra_mode != 'infra' }}"
+
     # ── 0. Prerequisites (mirrors install.sh + install_docker) ──────
     - name: Install base packages (apt)
       ansible.builtin.apt:
@@ -68,6 +78,7 @@
       when: ansible_facts.os_family == "Debian"
 
     - name: Check for Docker + Compose plugin
+      when: _run_infra
       ansible.builtin.shell: docker compose version
       register: _docker_check
       failed_when: false
@@ -81,15 +92,16 @@
         rm -f /tmp/get-docker.sh
       args:
         creates: /usr/bin/docker
-      when: _docker_check.rc != 0 and ansible_facts.os_family == "Debian"
+      when: _run_infra and _docker_check.rc != 0 and ansible_facts.os_family == "Debian"
 
     - name: Install Docker Compose plugin
       ansible.builtin.apt:
         name: docker-compose-plugin
         state: present
-      when: _docker_check.rc != 0 and ansible_facts.os_family == "Debian"
+      when: _run_infra and _docker_check.rc != 0 and ansible_facts.os_family == "Debian"
 
     - name: Enable and start Docker + containerd
+      when: _run_infra
       ansible.builtin.systemd:
         name: "{{ item }}"
         enabled: true
@@ -98,6 +110,7 @@
       failed_when: false
 
     - name: Repair containerd overlayfs snapshot dir if missing (mirrors fix_containerd_storage)
+      when: _run_infra
       ansible.builtin.shell: |
         SNAP_DIR=/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots
         if [ ! -d "$SNAP_DIR" ]; then
@@ -115,6 +128,7 @@
 
     # ── 1. Repo checkout (mirrors install.sh) ────────────────────────
     - name: Clone/update infra repo
+      when: _run_infra
       ansible.builtin.git:
         repo: "{{ infra_repo_url }}"
         dest: "{{ infra_install_dir }}"
@@ -130,6 +144,7 @@
     #     (empty, change_me_*, password, admin, admin123); user can read
     #     them from .env afterwards.
     - name: Create .env from .env.example when missing
+      when: _run_infra
       ansible.builtin.copy:
         src: "{{ infra_install_dir }}/.env.example"
         dest: "{{ infra_install_dir }}/.env"
@@ -138,6 +153,7 @@
         remote_src: true
 
     - name: Merge .env gaps and secrets (idempotent, never overwrites yours)
+      when: _run_infra
       ansible.builtin.shell: |
         python3 - "$@" <<'PYEOF'
         import os, sys, secrets, string
@@ -232,10 +248,11 @@
         - { key: ALERT_EMAIL_TO, value: "{{ infra_alert_email_to }}" }
         - { key: SMTP_USER, value: "{{ infra_smtp_user }}" }
         - { key: SMTP_PASSWORD, value: "{{ infra_smtp_password }}" }
-      when: item.value | string | length > 0
+      when: _run_infra and item.value | string | length > 0
       no_log: true
 
     - name: Load effective .env into facts for templating
+      when: _run_infra
       ansible.builtin.shell: |
         python3 -c 'import json; d={}; [d.update([ln.split("=",1)]) for ln in open(".env").read().splitlines() if ln and not ln.startswith("#") and "=" in ln]; print(json.dumps(d))'
       args:
@@ -245,6 +262,7 @@
       no_log: true
 
     - name: Set env fact
+      when: _run_infra
       ansible.builtin.set_fact:
         env: "{{ _env_json.stdout | from_json }}"
       no_log: true
@@ -253,20 +271,22 @@
     - name: Validate R2 settings when enabled
       ansible.builtin.fail:
         msg: "R2_BACKUP_ENABLED=true but {{ item }} is empty"
-      when: env.R2_BACKUP_ENABLED | lower == "true" and (env[item] | default('') | length == 0)
+      when: _run_infra and env.R2_BACKUP_ENABLED | lower == "true" and (env[item] | default('') | length == 0)
       loop: [R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET]
 
     - name: Require R2 account/endpoint when R2 enabled
       ansible.builtin.fail:
         msg: "Set R2_ACCOUNT_ID or R2_ENDPOINT when R2_BACKUP_ENABLED=true"
-      when: env.R2_BACKUP_ENABLED | lower == "true" and (env.R2_ENDPOINT | default('') | length == 0) and (env.R2_ACCOUNT_ID | default('') | length == 0)
+      when: _run_infra and env.R2_BACKUP_ENABLED | lower == "true" and (env.R2_ENDPOINT | default('') | length == 0) and (env.R2_ACCOUNT_ID | default('') | length == 0)
 
     - name: Resolve rclone endpoint
+      when: _run_infra
       ansible.builtin.set_fact:
         rclone_endpoint: "{{ env.R2_ENDPOINT if (env.R2_ENDPOINT | default('') | length > 0) else ('https://' + env.R2_ACCOUNT_ID + '.r2.cloudflarestorage.com' if (env.R2_BACKUP_ENABLED | lower == 'true') else '') }}"
 
     # ── 4. Render generated configs (mirrors render_* in setup.sh) ───
     - name: Generate PgBouncer self-signed cert when missing
+      when: _run_infra
       ansible.builtin.shell: |
         openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
           -keyout pgbouncer/pgbouncer-key.pem \
@@ -280,12 +300,14 @@
         creates: pgbouncer/pgbouncer-cert.pem
 
     - name: Render pgbouncer.ini
+      when: _run_infra
       ansible.builtin.template:
         src: pgbouncer.ini.j2
         dest: "{{ infra_install_dir }}/pgbouncer/pgbouncer.ini"
         mode: "0644"
 
     - name: Render pgbouncer userlist
+      when: _run_infra
       ansible.builtin.copy:
         content: |
           "{{ env.POSTGRES_USER }}" "{{ env.POSTGRES_PASSWORD }}"
@@ -295,6 +317,7 @@
       no_log: true
 
     - name: Render Redis HAProxy config
+      when: _run_infra
       ansible.builtin.template:
         src: haproxy.cfg.j2
         dest: "{{ infra_install_dir }}/redis/haproxy.generated.cfg"
@@ -302,17 +325,20 @@
       no_log: true
 
     - name: Ensure sentinel entrypoint is executable
+      when: _run_infra
       ansible.builtin.file:
         path: "{{ infra_install_dir }}/redis/sentinel-entrypoint.sh"
         mode: "0755"
 
     - name: Render pgAdmin servers.json
+      when: _run_infra
       ansible.builtin.template:
         src: servers.json.j2
         dest: "{{ infra_install_dir }}/pgadmin/servers.json"
         mode: "0644"
 
     - name: Render rclone config
+      when: _run_infra
       ansible.builtin.template:
         src: rclone.conf.j2
         dest: "{{ infra_install_dir }}/config/rclone/rclone.generated.conf"
@@ -320,6 +346,7 @@
       no_log: true
 
     - name: Render Alertmanager config
+      when: _run_infra
       ansible.builtin.template:
         src: alertmanager.yml.j2
         dest: "{{ infra_install_dir }}/monitoring/alertmanager.generated.yml"
@@ -327,12 +354,14 @@
       no_log: true
 
     - name: Normalize monitoring target permissions
+      when: _run_infra
       ansible.builtin.shell: chmod 644 monitoring/targets/*.json 2>/dev/null || true
       args:
         chdir: "{{ infra_install_dir }}"
       changed_when: false
 
     - name: Secure secrets dir (host-created bearer tokens, never in git)
+      when: _run_infra
       ansible.builtin.shell: |
         mkdir -p monitoring/secrets
         chmod 700 monitoring/secrets
@@ -348,16 +377,23 @@
       failed_when: false
       changed_when: false
 
-    - name: Configure UFW (deny incoming, allow service + Swarm ports)
+    - name: Configure UFW (deny incoming, allow service + Swarm + panel ports)
       ansible.builtin.shell: |
         ufw default deny incoming
         ufw allow {{ infra_ssh_port }}/tcp
+        {% if _run_infra %}
         ufw allow {{ env.PGBOUNCER_PORT }}/tcp
         ufw allow {{ env.POSTGRES_PORT_DIRECT }}/tcp
         ufw allow 2377/tcp comment 'swarm cluster management'
         ufw allow 7946/tcp comment 'swarm gossip'
         ufw allow 7946/udp comment 'swarm gossip'
         ufw allow 4789/udp comment 'swarm overlay networking'
+        {% endif %}
+        {% if _run_panel %}
+        ufw allow 7800/tcp comment 'aapanel'
+        ufw allow 80/tcp comment 'http'
+        ufw allow 443/tcp comment 'https'
+        {% endif %}
         ufw --force enable
         echo CHANGED
       register: _ufw_done
@@ -366,6 +402,7 @@
 
     # ── 6. Swarm init (mirrors init_swarm + deploy.sh guard) ─────────
     - name: Inspect Swarm state
+      when: _run_infra
       ansible.builtin.shell: docker info --format '{% raw %}{{.Swarm.LocalNodeState}}{% endraw %} {% raw %}{{.Swarm.ControlAvailable}}{% endraw %}'
       register: _swarm_state
       failed_when: false
@@ -376,17 +413,17 @@
         ip -o link show up 2>/dev/null | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-)' | head -1 | xargs -I{} ip -4 addr show {} 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -1
       register: _adv_iface_ip
       changed_when: false
-      when: "'active true' not in _swarm_state.stdout"
+      when: _run_infra and 'active true' not in _swarm_state.stdout
 
     - name: Resolve Swarm advertise address
       ansible.builtin.set_fact:
         _swarm_advertise: "{{ env.SWARM_ADVERTISE_ADDR if (env.SWARM_ADVERTISE_ADDR | default('') | length > 0) else (_adv_iface_ip.stdout | default('') | trim) }}"
-      when: "'active true' not in _swarm_state.stdout"
+      when: _run_infra and 'active true' not in _swarm_state.stdout
 
     - name: Leave stale/worker Swarm state when not an active manager
       ansible.builtin.shell: docker swarm leave --force 2>/dev/null || true
       changed_when: true
-      when: "'active true' not in _swarm_state.stdout"
+      when: _run_infra and 'active true' not in _swarm_state.stdout
 
     - name: Initialize Docker Swarm as manager
       ansible.builtin.shell: |
@@ -394,10 +431,11 @@
         echo CHANGED
       register: _swarm_init
       changed_when: "'CHANGED' in _swarm_init.stdout"
-      when: "'active true' not in _swarm_state.stdout"
+      when: _run_infra and 'active true' not in _swarm_state.stdout
 
     # ── 7. Overlay network (mirrors ensure_infra_network) ────────────
     - name: Inspect infra overlay network
+      when: _run_infra
       ansible.builtin.shell: docker network inspect {{ env.INFRA_NETWORK_NAME }}
       register: _net_inspect
       failed_when: false
@@ -408,19 +446,21 @@
       register: _net_kind
       changed_when: false
       failed_when: _net_kind.stdout.strip() != "overlay/swarm"
-      when: _net_inspect.rc == 0
+      when: _run_infra and _net_inspect.rc == 0
 
     - name: Create attachable overlay network
       ansible.builtin.shell: docker network create --driver overlay --attachable {{ env.INFRA_NETWORK_NAME }}
-      when: _net_inspect.rc != 0
+      when: _run_infra and _net_inspect.rc != 0
 
     # ── 8. Images (mirrors start_stack build logic) ──────────────────
     - name: Resolve backup image
+      when: _run_infra
       ansible.builtin.set_fact:
         _backup_image: "{{ infra_backup_image_override if (infra_backup_image_override | length > 0) else ('postgres:' + infra_postgres_client_image_tag if (env.R2_BACKUP_ENABLED | lower != 'true') else 'infra/backup:latest') }}"
         _pg_image: "{{ env.POSTGRES_IMAGE | default('infra/postgres:latest', true) }}"
 
     - name: Check postgres image presence
+      when: _run_infra
       ansible.builtin.shell: docker image inspect {{ _pg_image }}
       register: _pg_inspect
       failed_when: false
@@ -437,9 +477,10 @@
         chdir: "{{ infra_install_dir }}"
       register: _pg_build
       changed_when: "'CHANGED' in _pg_build.stdout"
-      when: _pg_inspect.rc != 0 and not (env.POSTGRES_IMAGE is match('postgis/.*') or env.POSTGRES_IMAGE is match('postgres:.*'))
+      when: _run_infra and _pg_inspect.rc != 0 and not (env.POSTGRES_IMAGE is match('postgis/.*') or env.POSTGRES_IMAGE is match('postgres:.*'))
 
     - name: Check backup image presence
+      when: _run_infra
       ansible.builtin.shell: docker image inspect {{ _backup_image }}
       register: _bak_inspect
       failed_when: false
@@ -457,15 +498,17 @@
       register: _bak_build
       changed_when: "'CHANGED' in _bak_build.stdout"
       when: >
-        _bak_inspect.rc != 0 and
+        _run_infra and _bak_inspect.rc != 0 and
         (infra_backup_image_override | length > 0 or (env.R2_BACKUP_ENABLED | lower == 'true'))
 
     # ── 9. Deploy stack (mirrors start_stack) ────────────────────────
     - name: Remove old stack to allow config updates
+      when: _run_infra
       ansible.builtin.shell: docker stack rm {{ env.INFRA_STACK_NAME }} 2>/dev/null || true
       changed_when: true
 
     - name: Wait for old stack removal (up to 120s)
+      when: _run_infra
       ansible.builtin.shell: |
         S="{{ env.INFRA_STACK_NAME }}"
         if [ -z "$(docker service ls --filter label=com.docker.stack.namespace=${S} -q 2>/dev/null)" ] \
@@ -484,6 +527,7 @@
       changed_when: false
 
     - name: Deploy stack
+      when: _run_infra
       ansible.builtin.shell: |
         set -a; . ./.env; set +a
         export POSTGRES_IMAGE="{{ _pg_image }}" INFRA_BACKUP_IMAGE="{{ _backup_image }}"
@@ -497,6 +541,7 @@
 
     # ── 10. PgBouncer auth role (mirrors configure_database_auth) ────
     - name: Wait for PostgreSQL to accept connections
+      when: _run_infra
       ansible.builtin.shell: docker run --rm --network {{ env.INFRA_NETWORK_NAME }} postgres:{{ infra_postgres_client_image_tag }} pg_isready -h postgres -U {{ env.POSTGRES_USER }} -d {{ env.POSTGRES_DB }}
       register: _pg_ready
       until: _pg_ready.rc == 0
@@ -506,6 +551,7 @@
       no_log: true
 
     - name: Configure pgbouncer.get_auth + auth role
+      when: _run_infra
       ansible.builtin.shell: |
         docker run --rm -i --network {{ env.INFRA_NETWORK_NAME }} -e PGPASSWORD="$PGPASS" postgres:{{ infra_postgres_client_image_tag }} \
           psql -h postgres -U "{{ env.POSTGRES_USER }}" -d postgres -v ON_ERROR_STOP=1 \
@@ -551,7 +597,7 @@
       delay: 2
       changed_when: false
       no_log: true
-      when: infra_verify_stack
+      when: _run_infra and infra_verify_stack
 
     - name: Verify PgBouncer wildcard routing with temp db+role
       ansible.builtin.shell: |
@@ -580,7 +626,7 @@
         PGPASS: "{{ env.POSTGRES_PASSWORD }}"
       changed_when: false
       no_log: true
-      when: infra_verify_stack
+      when: _run_infra and infra_verify_stack
 
     - name: Wait for Redis proxy on host port
       ansible.builtin.shell: docker run --rm --network host redis:{{ infra_redis_image_tag }} redis-cli -h {{ env.PROBE_HOST | default('127.0.0.1', true) }} -p {{ env.REDIS_PORT }} -a "$RPASS" --no-auth-warning ping 2>/dev/null | grep -q PONG
@@ -592,7 +638,7 @@
       delay: 2
       changed_when: false
       no_log: true
-      when: infra_verify_stack
+      when: _run_infra and infra_verify_stack
 
     # ── 12. Optional boot persistence (mirrors systemd/install-service.sh)
     - name: Enable Docker at boot
@@ -600,14 +646,14 @@
         name: "{{ item }}"
         enabled: true
       loop: [docker.service, containerd.service]
-      when: infra_install_systemd_service
+      when: _run_infra and infra_install_systemd_service
 
     - name: Install infra-stack systemd unit
       ansible.builtin.template:
         src: infra-stack.service.j2
         dest: /etc/systemd/system/infra-stack.service
         mode: "0644"
-      when: infra_install_systemd_service
+      when: _run_infra and infra_install_systemd_service
       notify: Reload systemd
 
     - name: Enable infra-stack service
@@ -615,13 +661,49 @@
         name: infra-stack.service
         enabled: true
         daemon_reload: true
-      when: infra_install_systemd_service
+      when: _run_infra and infra_install_systemd_service
 
-    # ── 13. Summary (mirrors print_summary) ──────────────────────────
+    # ── 13. aaPanel server panel (mirrors install_aapanel) ───────────
+    - name: Ensure install dir exists for panel log
+      ansible.builtin.file:
+        path: "{{ infra_install_dir }}"
+        state: directory
+        mode: "0755"
+      when: _run_panel
+
+    - name: Check for existing aaPanel install
+      ansible.builtin.shell: test -x /www/server/panel/BT-Panel || test -f /etc/init.d/bt
+      register: _panel_present
+      failed_when: false
+      changed_when: false
+      when: _run_panel
+
+    - name: Install aaPanel (takes several minutes, credentials land in aapanel-install.log)
+      ansible.builtin.shell: |
+        set -e
+        WORKDIR=$(mktemp -d /tmp/aapanel-install.XXXXXX)
+        cd "$WORKDIR"
+        if [ -f /usr/bin/curl ]; then curl -ksSO {{ infra_aapanel_url }}; else wget --no-check-certificate -O install_panel_en.sh {{ infra_aapanel_url }}; fi
+        bash install_panel_en.sh ipssl 2>&1 | tee {{ infra_install_dir }}/aapanel-install.log
+        rm -rf "$WORKDIR"
+        echo CHANGED
+      args:
+        executable: /bin/bash
+      register: _panel_install
+      changed_when: "'CHANGED' in _panel_install.stdout"
+      when: _run_panel and _panel_present.rc != 0
+
+    - name: Confirm aaPanel installed
+      ansible.builtin.shell: test -x /www/server/panel/BT-Panel || test -f /etc/init.d/bt
+      changed_when: false
+      when: _run_panel
+
+    # ── 14. Summary (mirrors print_summary) ──────────────────────────
     - name: Deployment summary
       ansible.builtin.debug:
         msg: |
-          Deployment complete (Ansible, native — no .sh involved).
+          Deployment complete (Ansible, native — no .sh involved). Mode: {{ infra_mode }}.
+          {% if _run_infra %}
           Postgres direct: {{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.POSTGRES_PORT_DIRECT }}
           PgBouncer: {{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.PGBOUNCER_PORT }} (URL: postgres://{{ env.POSTGRES_USER }}:<password>@{{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.PGBOUNCER_PORT }}/{{ env.POSTGRES_DB }})
           Redis: 127.0.0.1:{{ env.REDIS_PORT }}
@@ -629,6 +711,11 @@
           Grafana: http://{{ env.PUBLIC_HOST | default('127.0.0.1', true) }}:{{ env.GRAFANA_PORT }} ({{ env.GRAFANA_USER | default('admin', true) }})
           Backups: {{ infra_install_dir }}/backups, R2={{ env.R2_BACKUP_ENABLED }}
           Passwords live in {{ infra_install_dir }}/.env (auto-generated where empty).
+          {% endif %}
+          {% if _run_panel %}
+          aaPanel: https://<server-ip>:7800 (credentials: {{ infra_install_dir }}/aapanel-install.log).
+          Ports opened: 7800 (panel), 80 (http), 443 (https).
+          {% endif %}
 
   handlers:
     - name: Reload systemd

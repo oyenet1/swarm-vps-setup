@@ -99,7 +99,26 @@ Secrets behaviour (what you asked for):
 Common scenarios:
 
 ```bash
-# Cloudflare R2 backups
+### Setup mode — infra, panel, or both
+
+`infra_mode` (default `"infra"`) mirrors `setup.sh --mode`:
+
+```bash
+# aaPanel server panel only (no Docker/Swarm/stack)
+ansible-playbook -i inventory.ini site.yml -e infra_mode=panel
+# aaPanel first, then the full infra stack
+ansible-playbook -i inventory.ini site.yml -e infra_mode=both
+```
+
+| Mode | Does | Firewall adds |
+|---|---|---|
+| `infra` | Full flow from §2 | PgBouncer, Postgres direct, Swarm ports |
+| `panel` | Official aaPanel installer (`install_panel_en.sh ipssl`), skipped if already installed; credentials → `/opt/infra/aapanel-install.log` | `7800`, `80`, `443` |
+| `both` | Panel, then the full flow | all of the above |
+
+Panel URL after install: `https://<server-ip>:7800`.
+
+### Cloudflare R2 backups
 ansible-playbook -i inventory.ini site.yml \
   -e infra_r2_backup_enabled=true \
   -e infra_r2_account_id=abc123 \

@@ -106,6 +106,40 @@ Tune via `group_vars/all.yml` or `-e key=value`. Set
 Full guide (single VPS, workers, R2, secrets, troubleshooting):
 [`ansible/README.md`](ansible/README.md).
 
+### Choose what this server runs: infra, panel, or both
+
+On a terminal, the installer asks you directly:
+
+```
+What should this server run?
+  1) Infrastructure only (Docker Swarm stack)
+  2) aaPanel only (server control panel)
+  3) Both (aaPanel first, then the infra stack)
+```
+
+Non-interactive (piped installs never prompt — default is `infra`):
+
+```bash
+# shell: aaPanel only
+curl -fsSL https://raw.githubusercontent.com/oyenet1/swarm-vps-setup/master/install.sh \
+  | sudo bash -s -- -s 22 --mode panel
+# shell: both
+sudo ./setup.sh -s 22 --mode both
+
+# ansible: aaPanel only / both
+ansible-playbook -i inventory.ini site.yml -e infra_mode=panel
+ansible-playbook -i inventory.ini site.yml -e infra_mode=both
+```
+
+| Mode | Installs | Firewall adds |
+|---|---|---|
+| `infra` (default) | Swarm stack (postgres, redis, monitoring, backups) | PgBouncer, Postgres direct, Swarm ports (`2377/tcp`, `7946/tcp+udp`, `4789/udp`) |
+| `panel` | [aaPanel](https://www.aapanel.com) via the official `install_panel_en.sh ipssl` installer (skipped if already present) | `7800` (panel), `80`, `443` |
+| `both` | aaPanel first, then the full stack | all of the above |
+
+aaPanel credentials are printed by its installer and saved to
+`/opt/infra/aapanel-install.log` (gitignored). Panel URL: `https://YOUR_VPS_IP:7800`.
+
 ## Connection URLs
 
 ### PostgreSQL via PgBouncer (use this for apps)
